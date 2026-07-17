@@ -25,12 +25,26 @@ export interface RemotePlayer {
   drifting: boolean
   score: number
   rpm: number
+  // police (only meaningful when bot === 1)
+  bot: number
+  copMode: number // 0 patrol · 1 pursuit · 2 interrogate · 3 cooldown
+  pinT: number
+  copTarget: string
   // interpolated pose (written by interpolate())
   x: number
   z: number
   yaw: number
   speed: number
   slip: number
+}
+
+export interface CopTurnMsg {
+  reply: string
+  mood: string
+  disposition: number // drives the happy/annoyed sting — never rendered as a number
+  verdict: 'pending' | 'release' | 'arrest'
+  timeLimit?: number
+  score?: number
 }
 
 const INTERP_DELAY = 0.12 // s behind server time (two 20 Hz snapshots)
@@ -42,6 +56,10 @@ export class NetClient {
   myId = ''
   serverScore = 0
   onHorn: (id: string) => void = () => {}
+  onCopAggro: (id: string) => void = () => {}
+  onCopOpen: (turn: CopTurnMsg) => void = () => {}
+  onCopReply: (turn: CopTurnMsg) => void = () => {}
+  onCopVerdict: (id: string, verdict: 'release' | 'arrest') => void = () => {}
   getSpawn: (() => { x: number; z: number }) | null = null // current car pos, used to rejoin in place
 
   private pending: InputFrame[] = []
@@ -71,6 +89,10 @@ export class NetClient {
       this.connected = true
 
       this.room.onMessage('horn', (msg: { id: string }) => this.onHorn(msg.id))
+      this.room.onMessage('cop:aggro', (msg: { id: string }) => this.onCopAggro(msg.id))
+      this.room.onMessage('cop:open', (msg: CopTurnMsg) => this.onCopOpen(msg))
+      this.room.onMessage('cop:reply', (msg: CopTurnMsg) => this.onCopReply(msg))
+      this.room.onMessage('cop:verdict', (msg: { id: string; verdict: 'release' | 'arrest' }) => this.onCopVerdict(msg.id, msg.verdict))
       this.room.onLeave(() => {
         // dead room: stop reconciling against its frozen state (it would pin the car
         // in place) and quietly rejoin — the dev server restarts whenever shared physics change
@@ -112,6 +134,10 @@ export class NetClient {
 
   horn(): void {
     this.room?.send('horn')
+  }
+
+  copChat(text: string): void {
+    this.room?.send('cop:chat', text)
   }
 
   // reconcile local prediction against the latest server state; returns true if corrected
@@ -162,7 +188,7 @@ export class NetClient {
     const players = this.room.state?.players
     if (!players?.forEach) return
     const seen = new Set<string>()
-    players.forEach((p: Record<string, never> & { x: number; z: number; yaw: number; speed: number; slip: number; brake: boolean; handbrake: boolean; headlights: boolean; drifting: boolean; score: number; rpm: number; color: number; name: string }, id: string) => {
+    players.forEach((p: Record<string, never> & { x: number; z: number; yaw: number; speed: number; slip: number; brake: boolean; handbrake: boolean; headlights: boolean; drifting: boolean; score: number; rpm: number; color: number; name: string; bot: number; copMode: number; pinT: number; copTarget: string }, id: string) => {
       seen.add(id)
       if (id === this.myId) return
       let r = this.remotes.get(id)
@@ -170,6 +196,7 @@ export class NetClient {
         r = {
           id, name: p.name, color: p.color, snapshots: [],
           brake: false, handbrake: false, headlights: true, drifting: false, score: 0, rpm: 900,
+          bot: p.bot ?? 0, copMode: 0, pinT: 0, copTarget: '',
           x: p.x, z: p.z, yaw: p.yaw, speed: 0, slip: 0,
         }
         this.remotes.set(id, r)
@@ -185,6 +212,10 @@ export class NetClient {
       r.drifting = p.drifting
       r.score = p.score
       r.rpm = p.rpm
+      r.bot = p.bot ?? 0
+      r.copMode = p.copMode ?? 0
+      r.pinT = p.pinT ?? 0
+      r.copTarget = p.copTarget ?? ''
     })
     for (const id of [...this.remotes.keys()]) {
       if (!seen.has(id)) this.remotes.delete(id)

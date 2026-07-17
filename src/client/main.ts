@@ -4,11 +4,12 @@ import { PSXPipeline } from './renderer/psx'
 import { PSX_UNIFORMS } from './renderer/patch'
 import { makeSky, FOG_COLOR } from './world/sky'
 import { World } from './world/world'
-import { loadCar, CarModel } from './world/assets'
-import { HeadlightRig, buildLampGlows } from './fx/lights'
+import { loadCar, loadPoliceCar, CarModel } from './world/assets'
+import { HeadlightRig, LightBar, buildLampGlows } from './fx/lights'
 import { SmokePool } from './fx/particles'
 import { Skidmarks } from './fx/skidmarks'
 import { HUD } from './ui/hud'
+import { CopChat } from './ui/copchat'
 import { DebugPanel } from './ui/debug'
 import { GameAudio } from './audio/engine'
 import { parseMap } from '../shared/map'
@@ -17,6 +18,7 @@ import { InputShaper, RawInput } from '../shared/input'
 import { TUNING, PHYS_DT, CAR_WIDTH, CAR_LENGTH } from '../shared/constants'
 import { makeScore, stepScore } from '../shared/scoring'
 import { NetClient, RemotePlayer } from './net/net'
+import { PIN_TIME } from '../shared/police'
 
 // ---------- join screen ----------
 const COLORS = ['#4a7a3a', '#8a8f98', '#4a6fa5', '#a53a3a']
@@ -130,30 +132,82 @@ async function boot(): Promise<void> {
   const spawnQ = new URLSearchParams(location.search).get('spawn')?.split(',').map(Number)
   const online = await net.connect(playerName, chosenColor, spawnQ?.[0], spawnQ?.[1])
   console.log('[net]', online ? 'connected to room' : 'offline single-player')
-  net.onHorn = () => audio.horn()
+  net.onHorn = (id) => {
+    const r = net.remotes.get(id)
+    if (!r) return audio.horn()
+    audio.horn(Math.max(0, 1 - Math.hypot(r.x - car.x, r.z - car.z) / 85))
+  }
 
-  // remote car visuals, created lazily as players appear
-  interface RemoteVis { model: CarModel; rig: HeadlightRig; tag: HTMLElement }
+  // remote car visuals, created lazily as players appear (the cop is just a remote
+  // with bot === 1 — same interpolation path, different model + a light bar)
+  interface RemoteVis { model: CarModel; rig: HeadlightRig; tag: HTMLElement; bar?: LightBar }
   const remoteVis = new Map<string, RemoteVis>()
+  const pending = new Set<string>()
   const tagLayer = document.createElement('div')
   tagLayer.style.cssText = 'position:fixed;inset:0;pointer-events:none;font-family:var(--pix);font-size:11px;color:#cfd2e8;text-shadow:1px 1px 0 #000'
   document.body.appendChild(tagLayer)
 
-  async function ensureRemoteVis(r: RemotePlayer): Promise<RemoteVis> {
-    let v = remoteVis.get(r.id)
-    if (!v) {
-      const model = await loadCar(r.color)
+  async function ensureRemoteVis(r: RemotePlayer): Promise<void> {
+    if (remoteVis.has(r.id) || pending.has(r.id)) return
+    pending.add(r.id) // frames keep running while the OBJ loads — don't start it twice
+    try {
+      const isCop = r.bot === 1
+      const model = isCop ? await loadPoliceCar() : await loadCar(r.color)
       const rig = new HeadlightRig(CAR_WIDTH, CAR_LENGTH)
       scene.add(model.group)
       scene.add(rig.group)
       const tag = document.createElement('div')
       tag.style.position = 'absolute'
       tag.textContent = r.name
+      if (isCop) tag.style.color = '#8fb4ff'
       tagLayer.appendChild(tag)
-      v = { model, rig, tag }
+      const v: RemoteVis = { model, rig, tag }
+      if (isCop) {
+        v.bar = new LightBar(CAR_LENGTH)
+        scene.add(v.bar.group)
+      }
       remoteVis.set(r.id, v)
+    } catch (e) {
+      console.warn('[net] remote model load failed', r.id, e)
+    } finally {
+      pending.delete(r.id)
     }
-    return v
+  }
+
+  // ---------- the traffic stop ----------
+  const copChat = new CopChat()
+  const pinRing = document.createElement('div')
+  pinRing.id = 'cop-pin'
+  document.body.appendChild(pinRing)
+  let frozen = false // local car is the interrogation target — server is zeroing it
+  net.onCopAggro = (id) => {
+    audio.sirenChirp()
+    if (id === net.myId) hud.toast('POLICE — PULL OVER', 'bad')
+  }
+  let copMood = 0 // last disposition, to hear which way his mood swung
+  net.onCopOpen = (turn) => {
+    frozen = true
+    for (const k of Object.keys(raw) as (keyof RawInput)[]) raw[k] = false // drop any held key
+    audio.setInterrogation(true)
+    audio.copSting('open')
+    copMood = turn.disposition
+    copChat.start(turn, (text) => net.copChat(text))
+  }
+  net.onCopReply = (turn) => {
+    audio.copSting(turn.disposition >= copMood ? 'happy' : 'annoyed')
+    copMood = turn.disposition
+    copChat.say(turn)
+  }
+  net.onCopVerdict = (id, verdict) => {
+    if (id !== net.myId) return
+    copChat.verdict(verdict, Math.floor(score.total))
+    audio.setInterrogation(false)
+    if (verdict === 'arrest') {
+      score.total = 0
+      score.chain = 0
+      score.multiplier = 1
+    }
+    frozen = false
   }
 
   // ---------- input ----------
@@ -207,6 +261,11 @@ async function boot(): Promise<void> {
       x: +car.x.toFixed(1), z: +car.z.toFixed(1), yaw: +car.yaw.toFixed(2),
       slip: +car.slipAngle.toFixed(3),
       draws: pipeline.renderer.info.render.calls, tris: pipeline.renderer.info.render.triangles,
+      cop: (() => {
+        const c = [...net.remotes.values()].find((r) => r.bot === 1)
+        return c ? { x: +c.x.toFixed(1), z: +c.z.toFixed(1), mode: c.copMode, pinT: +c.pinT.toFixed(2), target: c.copTarget === net.myId ? 'me' : c.copTarget } : null
+      })(),
+      frozen,
     })
   }, 500)
   const prev = makeCarState()
@@ -346,12 +405,19 @@ async function boot(): Promise<void> {
           brake = Math.abs(car.speed) > vTarget + 4 || (Math.abs(err) > 0.9 && Math.abs(car.speed) > 10) ? 0.8 : 0
         }
       }
+      // pulled over: the server is zeroing the car, so stop driving and let
+      // reconciliation hold it — otherwise prediction fights authority
+      if (frozen) {
+        steer = 0
+        throttle = 0
+        brake = 0
+      }
       shapedInput = {
         seq: seq++,
         steer,
         throttle,
         brake,
-        handbrake: raw.handbrake,
+        handbrake: frozen ? false : raw.handbrake,
         headlights,
       }
       stepCar(car, shapedInput, TUNING, PHYS_DT, map.surfaceAt, map.colliders, map.heightAt)
@@ -363,13 +429,13 @@ async function boot(): Promise<void> {
         })
       }
       stepScore(score, car, PHYS_DT)
-      net.sendInput(shapedInput)
+      if (!frozen) net.sendInput(shapedInput)
       if (car.wallHit > 2.5) audio.crash(car.wallHit)
       // player list (self + remotes), refreshed twice a second
       if (seq % 30 === 0) {
         hud.setPlayers([
           { name: playerName, score: Math.floor(score.total), me: true },
-          ...[...net.remotes.values()].map((r) => ({ name: r.name, score: r.score, me: false })),
+          ...[...net.remotes.values()].filter((r) => r.bot !== 1).map((r) => ({ name: r.name, score: r.score, me: false })), // the cop isn't competing
         ])
       }
 
@@ -446,6 +512,9 @@ async function boot(): Promise<void> {
     audio.update(car, shapedInput.throttle, score.drifting, dt)
 
     // ---------- multiplayer: reconcile local car, interpolate remotes ----------
+    let copDist = Infinity
+    let copActive = false
+    let ringVisible = false
     if (net.connected) {
       net.reconcile(car)
       const nowS = performance.now() / 1000
@@ -466,6 +535,32 @@ async function boot(): Promise<void> {
         world.lampTintAt(r.x, r.z, tint2, 0)
         for (const m of v.model.tintables) m.color.setRGB(1.8 + tint2.r * 2.6, 1.8 + tint2.g * 2.6, 1.8 + tint2.b * 2.6)
         v.rig.update(r.headlights, r.brake, false, map.mistAt(r.x, r.z))
+        if (v.bar) {
+          // lights while pursuing / interrogating; the bar rides the car
+          v.bar.update(r.copMode >= 1, dt)
+          v.bar.group.position.set(r.x, rh, r.z)
+          v.bar.group.rotation.y = r.yaw
+          copDist = Math.hypot(r.x - ix, r.z - iz)
+          copActive = r.copMode === 1 // pursuit only — the siren goes off at the stop
+          // pin ring at the midpoint of cop and target — everyone sees the arrest land
+          if (r.pinT > 0 && r.copTarget) {
+            const t = net.remotes.get(r.copTarget)
+            const tx = r.copTarget === net.myId ? ix : t?.x
+            const tz = r.copTarget === net.myId ? iz : t?.z
+            if (tx !== undefined && tz !== undefined) {
+              const mx = (r.x + tx) / 2, mz = (r.z + tz) / 2
+              const pp = new THREE.Vector3(mx, map.heightAt(mx, mz) + 1, mz).project(camera)
+              if (pp.z < 1) {
+                const frac = Math.min(1, r.pinT / PIN_TIME) * 360
+                pinRing.style.display = 'block'
+                pinRing.style.left = ((pp.x * 0.5 + 0.5) * window.innerWidth) + 'px'
+                pinRing.style.top = ((-pp.y * 0.5 + 0.5) * window.innerHeight) + 'px'
+                pinRing.style.background = `conic-gradient(${v.bar.phase() ? '#3355ff' : '#ff2b2b'} ${frac}deg, rgba(0,0,0,0.35) ${frac}deg)`
+                ringVisible = true
+              }
+            }
+          }
+        }
         // name tag above the car
         const sp = new THREE.Vector3(r.x, map.heightAt(r.x, r.z) + 2.2, r.z).project(camera)
         if (sp.z < 1) {
@@ -480,11 +575,15 @@ async function boot(): Promise<void> {
         if (!net.remotes.has(id)) {
           scene.remove(v.model.group)
           scene.remove(v.rig.group)
+          if (v.bar) scene.remove(v.bar.group)
           v.tag.remove()
           remoteVis.delete(id)
         }
       }
     }
+    if (!ringVisible) pinRing.style.display = 'none'
+    audio.updateSiren(copActive, copDist)
+    copChat.tick()
 
     pipeline.render(scene, camera)
   }

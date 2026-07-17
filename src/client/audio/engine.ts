@@ -32,6 +32,16 @@ export class GameAudio {
   private hornBuf: AudioBuffer | null = null
   private brakeBuf: AudioBuffer | null = null
   private throttleSmooth = 0
+  // police siren: no sample exists in the packs, so it's synthesized like the screech
+  private siren!: OscillatorNode
+  private sirenLfo!: OscillatorNode
+  private sirenGain!: GainNode
+  // the traffic stop: everything else drops out and one loop plays under Bram
+  private stopBuf: AudioBuffer | null = null
+  private stopSrc: AudioBufferSourceNode | null = null
+  private stopGain: GainNode | null = null
+  private copSfx: Record<'open' | 'happy' | 'annoyed', AudioBuffer | null> = { open: null, happy: null, annoyed: null }
+  interrogating = false
   // car radio: static burst → radio.mp3 (replaces the old always-on music loop)
   private radioBuf: AudioBuffer | null = null
   private staticBuf: AudioBuffer | null = null
@@ -155,6 +165,29 @@ export class GameAudio {
     this.screech.connect(this.vehicleBus)
     noise.start()
 
+    // --- police siren: sawtooth wail, LFO-swept between two tones, speaker-banded ---
+    this.siren = ctx.createOscillator()
+    this.siren.type = 'sawtooth'
+    this.siren.frequency.value = 620
+    this.sirenLfo = ctx.createOscillator()
+    this.sirenLfo.type = 'sine'
+    this.sirenLfo.frequency.value = 0.45 // wail period ≈ 2.2 s
+    const lfoDepth = ctx.createGain()
+    lfoDepth.gain.value = 175 // ±175 Hz around 620
+    this.sirenLfo.connect(lfoDepth)
+    lfoDepth.connect(this.siren.frequency)
+    const sirenBand = ctx.createBiquadFilter()
+    sirenBand.type = 'bandpass'
+    sirenBand.frequency.value = 800
+    sirenBand.Q.value = 1.4
+    this.sirenGain = ctx.createGain()
+    this.sirenGain.gain.value = 0
+    this.siren.connect(sirenBand)
+    sirenBand.connect(this.sirenGain)
+    this.sirenGain.connect(this.vehicleBus)
+    this.siren.start()
+    this.sirenLfo.start()
+
     // offroad rumble: same noise, low band
     const rumbleFilter = ctx.createBiquadFilter()
     rumbleFilter.type = 'lowpass'
@@ -164,6 +197,12 @@ export class GameAudio {
     noise.connect(rumbleFilter)
     rumbleFilter.connect(this.rumble)
     this.rumble.connect(this.vehicleBus)
+
+    // the stop: loop + Bram's stingers
+    fetchBuffer(ctx, '/assets/audio/background-loop.mp3').then((b) => (this.stopBuf = b))
+    fetchBuffer(ctx, '/assets/audio/cop-first-message.mp3').then((b) => (this.copSfx.open = b))
+    fetchBuffer(ctx, '/assets/audio/cop-happy.mp3').then((b) => (this.copSfx.happy = b))
+    fetchBuffer(ctx, '/assets/audio/cop-annoyed.mp3').then((b) => (this.copSfx.annoyed = b))
 
     fetchBuffer(ctx, '/assets/audio/car/Car_Horn.ogg').then((b) => (this.hornBuf = b))
     fetchBuffer(ctx, '/assets/audio/car/Car_Parking_Brake.ogg').then((b) => (this.brakeBuf = b))
@@ -183,8 +222,10 @@ export class GameAudio {
     src.start()
   }
 
-  horn(): void {
-    this.playOneShot(this.hornBuf, 0.8)
+  // `near` 0..1 — remote honks fall off with distance instead of blaring from
+  // across the village at full volume
+  horn(near = 1): void {
+    this.playOneShot(this.hornBuf, 0.42 * near)
   }
 
   // --- car radio ---
@@ -245,6 +286,87 @@ export class GameAudio {
 
   handbrakePull(): void {
     this.playOneShot(this.brakeBuf, 0.5)
+  }
+
+  // --- police ---
+  // `dist` in metres from the local car; the siren fades out past ~90 m.
+  updateSiren(active: boolean, dist: number): void {
+    if (!this.ready) return
+    const near = Math.max(0, 1 - dist / 90)
+    const target = active ? 0.035 + near * near * 0.16 : 0
+    this.sirenGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.25)
+  }
+
+  // Pulled over: the world goes quiet — engine, tyres, siren and the radio all drop
+  // out and a single loop plays under the conversation.
+  setInterrogation(on: boolean): void {
+    if (!this.ready || this.interrogating === on) return
+    this.interrogating = on
+    const t = this.ctx.currentTime
+    this.vehicleBus.gain.setTargetAtTime(on ? 0 : 0.9, t, 0.25)
+    this.musicBus.gain.setTargetAtTime(on ? 0 : 0.16, t, 0.25)
+    if (on) {
+      if (this.radioSrc && this.radioGain) {
+        // leave radioOn alone — his radio resumes where it left off afterwards
+        this.radioGain.gain.setTargetAtTime(0.0001, t, 0.2)
+        this.radioSrc.stop(t + 0.6)
+        this.radioSrc = null
+        this.radioGain = null
+      }
+      if (this.stopBuf && !this.stopSrc) {
+        const src = this.ctx.createBufferSource()
+        src.buffer = this.stopBuf
+        src.loop = true
+        const g = this.ctx.createGain()
+        g.gain.setValueAtTime(0.0001, t)
+        g.gain.exponentialRampToValueAtTime(0.95, t + 1.2)
+        src.connect(g)
+        g.connect(this.master)
+        src.start(t)
+        this.stopSrc = src
+        this.stopGain = g
+      }
+    } else {
+      if (this.stopSrc && this.stopGain) {
+        this.stopGain.gain.setTargetAtTime(0.0001, t, 0.3)
+        this.stopSrc.stop(t + 1.2)
+        this.stopSrc = null
+        this.stopGain = null
+      }
+      if (this.radioOn) this.tuneIn() // back to the station, mid-song
+    }
+  }
+
+  // one stinger per beat of the stop: his opener, then each swing in his mood
+  copSting(kind: 'open' | 'happy' | 'annoyed'): void {
+    if (!this.ready) return
+    const buf = this.copSfx[kind]
+    if (!buf) return
+    const src = this.ctx.createBufferSource()
+    src.buffer = buf
+    const g = this.ctx.createGain()
+    g.gain.value = 3.4 // he's leaning in your window — these carry the scene
+    src.connect(g)
+    g.connect(this.master) // master, not vehicleBus — that's muted during the stop
+    src.start()
+  }
+
+  // short rising whoop the moment he decides you're worth chasing
+  sirenChirp(): void {
+    if (!this.ready) return
+    const t = this.ctx.currentTime
+    const o = this.ctx.createOscillator()
+    o.type = 'sawtooth'
+    o.frequency.setValueAtTime(380, t)
+    o.frequency.exponentialRampToValueAtTime(1050, t + 0.35)
+    const g = this.ctx.createGain()
+    g.gain.setValueAtTime(0.0001, t)
+    g.gain.exponentialRampToValueAtTime(0.22, t + 0.05)
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.45)
+    o.connect(g)
+    g.connect(this.vehicleBus)
+    o.start(t)
+    o.stop(t + 0.5)
   }
 
   crash(intensity: number): void {

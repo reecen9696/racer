@@ -8,10 +8,11 @@
     "build": "tsc -p tsconfig.server.json",
     "build:client": "vite build",
     "start": "node build/server/index.js",
-    "server": "tsx src/server/index.ts",
+    "server": "tsx --env-file-if-exists=.env src/server/index.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.112.1",
     "@colyseus/schema": "^2.0.32",
     "@colyseus/tools": "^0.15.49",
     "colyseus": "^0.15.17",

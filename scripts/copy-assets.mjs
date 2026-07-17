@@ -14,6 +14,7 @@ const copies = [
   ['3d models/cars_PSX/Car 01', 'cars/car01'],
   ['3d models/cars_PSX/Car 02', 'cars/car02'],
   ['3d models/cars_PSX/Car 06', 'cars/car06'],
+  ['3d models/cars_PSX/Car 05', 'cars/car05'], // police (Car5_Police.obj + car5_police.png)
   ['3d models/cars_PSX/Wheel', 'cars/wheel'],
   ['3d models/cars_PSX/Shadow (3D)', 'cars/shadow'],
   ['3d models/cars_PSX/Sound effects', 'audio/car'],
@@ -49,6 +50,10 @@ const copies = [
   ['background sounds/background-loop.mp3', 'audio/background-loop.mp3'],
   ['background sounds/radio/radio.mp3', 'audio/radio.mp3'],
   ['background sounds/radio/radio-static.mp3', 'audio/radio-static.mp3'],
+  // Sgt Hollis: stinger on his opening line, then one per swing in his mood
+  ['background sounds/cop/cop-first-message.mp3', 'audio/cop-first-message.mp3'],
+  ['background sounds/cop/cop-annoyed.mp3', 'audio/cop-annoyed.mp3'],
+  ['background sounds/cop/cop-happy.mp3', 'audio/cop-happy.mp3'],
 ]
 
 mkdirSync(out, { recursive: true })

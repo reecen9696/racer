@@ -129,6 +129,54 @@ export function makeHeadlightCone(length = 19, radius = 2.8): THREE.Mesh {
   return mesh
 }
 
+// Police roof bar: two additive sprites that alternate at 1.5 Hz while the cop is
+// running lights. `phase()` is also read by the world tint so the flash paints the
+// houses and hedges as he passes.
+export class LightBar {
+  group = new THREE.Group()
+  private red: THREE.Sprite
+  private blue: THREE.Sprite
+  private redPool: THREE.Mesh
+  private bluePool: THREE.Mesh
+  private t = 0
+  private on = false
+
+  constructor(carLen = 4.5) {
+    const y = 1.32 // just above the roof
+    this.red = makeGlowSprite(0xff2b2b, 2.0, 0)
+    this.red.position.set(-0.35, y, carLen * 0.03)
+    this.blue = makeGlowSprite(0x3355ff, 2.0, 0)
+    this.blue.position.set(0.35, y, carLen * 0.03)
+    // ground wash so the flash reads on the road, not just as a floating dot
+    this.redPool = makePoolQuad(0xff2b2b, 9, 9, 0)
+    this.redPool.position.set(-1.2, 0.05, 0)
+    this.bluePool = makePoolQuad(0x3355ff, 9, 9, 0)
+    this.bluePool.position.set(1.2, 0.05, 0)
+    this.group.add(this.red, this.blue, this.redPool, this.bluePool)
+  }
+
+  // 0 = red half of the cycle, 1 = blue half
+  phase(): number {
+    return this.t % 1 < 0.5 ? 0 : 1
+  }
+
+  update(active: boolean, dt: number): void {
+    this.on = active
+    this.group.visible = active
+    if (!active) return
+    this.t += dt * 1.5
+    const blue = this.phase() === 1
+    ;(this.red.material as THREE.SpriteMaterial).opacity = blue ? 0.12 : 1
+    ;(this.blue.material as THREE.SpriteMaterial).opacity = blue ? 1 : 0.12
+    ;(this.redPool.material as THREE.MeshBasicMaterial).opacity = blue ? 0.05 : 0.5
+    ;(this.bluePool.material as THREE.MeshBasicMaterial).opacity = blue ? 0.5 : 0.05
+  }
+
+  isOn(): boolean {
+    return this.on
+  }
+}
+
 // the full per-car light rig: cones + ground pool + glow sprites + tail/brake lights
 export class HeadlightRig {
   group = new THREE.Group()

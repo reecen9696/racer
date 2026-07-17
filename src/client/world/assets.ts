@@ -107,6 +107,14 @@ const PARKED_VARIANTS: Array<[string, string]> = [
   ['/assets/cars/car02/Car2.obj', '/assets/cars/car02/car2_red.png'],
 ]
 
+// the police cruiser ships as its own OBJ + texture in the Car 05 folder
+const POLICE_OBJ = '/assets/cars/car05/Car5_Police.obj'
+const POLICE_TEX = '/assets/cars/car05/car5_police.png'
+
+export async function loadPoliceCar(): Promise<CarModel> {
+  return buildCar(POLICE_OBJ, POLICE_TEX)
+}
+
 export async function loadCar(colorIdx = 0, parkedVariant = -1): Promise<CarModel> {
   const suffix = CAR_COLORS[colorIdx % CAR_COLORS.length]
   let objUrl = '/assets/cars/car01/Car.obj'
@@ -114,6 +122,10 @@ export async function loadCar(colorIdx = 0, parkedVariant = -1): Promise<CarMode
   if (parkedVariant >= 0) {
     ;[objUrl, texUrl] = PARKED_VARIANTS[parkedVariant % PARKED_VARIANTS.length]
   }
+  return buildCar(objUrl, texUrl)
+}
+
+async function buildCar(objUrl: string, texUrl: string): Promise<CarModel> {
   const [obj, tex, shadowTex] = await Promise.all([
     objLoader.loadAsync(objUrl),
     loadTexture(texUrl),

@@ -3,3 +3,5 @@ public/assets
 build
 .colyseus-cloud.json
 .DS_Store
+.env
+.env.*
