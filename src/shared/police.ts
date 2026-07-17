@@ -35,9 +35,9 @@ export interface CopBrain {
 }
 
 export const PIN_TIME = 5 // s pinned before interrogation
-export const PIN_DIST = 6.0 // m — he's holding you, not touching bumpers
-export const COP_STOP_V = 3 // m/s
-export const TARGET_STOP_V = 3.5 // ≈12 km/h — a slow roll still counts as pulled over
+export const PIN_DIST = 9.0 // m — he's holding you from a car's length back, not touching bumpers
+export const COP_STOP_V = 3 // m/s — allowance ON TOP of the target's speed (see the pin gate)
+export const TARGET_STOP_V = 3.5 // 12.6 km/h — a slow roll still counts as pulled over
 export const PIN_DECAY = 0.6 // pinT bleed-off per second when the hold breaks (was 2/s,
 // which wiped several seconds of progress on any wobble and demanded a dead stop)
 export const AGGRO_IMPULSE = 3.5 // m/s impact speed from collideCarPair to trigger pursuit
@@ -237,7 +237,11 @@ export function stepCopBrain(
   // Skipped whenever he's SUPPOSED to be stationary — mid-pin, or crawling the last
   // few metres onto a stopped target. Standing still there is the job, not a wedge;
   // without this he teleports away in the middle of pulling you over.
-  const holding = brain.pinT > 0 || (brain.mode === 'pursuit' && nearest < PIN_DIST * 3)
+  // Narrow on purpose: only a genuine pin approach counts — close to a target that is
+  // ALREADY slow. Keying it off distance alone (PIN_DIST*3 = 27m) would exempt a cop
+  // wedged anywhere near a fleeing driver and hand back the stuck-forever bug.
+  const tgt = brain.mode === 'pursuit' ? players.get(brain.targetId) : undefined
+  const holding = brain.pinT > 0 || (!!tgt && nearest < PIN_DIST + 4 && Math.abs(tgt.speed) < TARGET_STOP_V)
   if (holding) {
     brain.wedgeT = 0
     brain.lastX = cop.x
@@ -352,7 +356,11 @@ export function stepCopBrain(
     if (Math.abs(input.steer) > 0.85 && Math.abs(cop.speed) > 16) input.handbrake = true
 
     // --- pin condition ---
-    if (d < PIN_DIST && Math.abs(cop.speed) < COP_STOP_V && Math.abs(target.speed) < TARGET_STOP_V) {
+    // The cop's gate is RELATIVE to the target, not absolute. Pacing a rolling car he
+    // drives at target.speed + a closing margin, so an absolute cap meant a driver
+    // trundling at 8 km/h put the COP over the limit and the pin never armed — it
+    // looked like your speed was the problem when it was his.
+    if (d < PIN_DIST && Math.abs(cop.speed) < COP_STOP_V + Math.abs(target.speed) && Math.abs(target.speed) < TARGET_STOP_V) {
       brain.pinT += dt
       pinnedNow = true
       // creep against the target to hold the pin
