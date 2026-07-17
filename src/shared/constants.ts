@@ -23,10 +23,14 @@ export const TUNING = {
   maxSpeed: 52, // m/s soft cap (~187 km/h)
 
   gripFront: 1.5, // peak lateral μ per axle (force = μ × load) — real-tire scale, saturates in fast corners
-  gripRear: 1.45,
+  gripRear: 1.6,
   peakSlipFront: 0.16, // rad — slip angle at grip peak (front peaks early → push/understeer past it)
   peakSlipRear: 0.20,
-  gripFalloff: 0.38, // how much grip is lost far past the peak (0..1) — scaled per surface
+  gripFalloff: 0.18, // how much grip is lost far past the peak (0..1) — scaled per surface.
+  // Above ~0.22 the rear never regains enough grip to come back and the car settles into
+  // a STABLE drift it holds forever — that's the "handbrake drift won't stop" feel, and
+  // no amount of recovery damping escapes it (damping kills the yaw the car needs to
+  // rotate straight again). Measured: 0.30 -> never settles, 0.22 -> 1.2s.
 
   driveTraction: 1.25, // rear longitudinal friction budget (× load × surface) — exceeding it = wheelspin
   brakeBias: 0.65, // front share of brake force (friction circle)
@@ -42,11 +46,12 @@ export const TUNING = {
 
   // input shaping (client-side, pre-packet)
   steerMaxLow: 0.66, // rad max steer at standstill
-  steerMaxHigh: 0.045, // rad max steer at maxSpeed (~2.6 deg — real cars use less)
+  steerMaxHigh: 0.06, // rad max steer at maxSpeed (~3.4 deg — real cars use less)
   steerAttack: 5.0, // full-locks per second toward target — quick corrections, still flickable
   steerRelease: 6.0, // return-to-center rate
   assistGain: 0.65, // counter-steer assist strength (0..1); assist recenters steering around drift equilibrium
   assistMax: 0.5, // rad
+  counterSteerBoost: 2.8, // ×lock restored when fully sideways — how hard a slide is to catch
   throttleAttack: 3.2, // keyboard throttle ramp 0→1 per second
   throttleRelease: 6.0,
   yawDamping: 0.55, // 1/s — enough self-stabilizing that slides decay instead of snapping around

@@ -100,6 +100,7 @@ export function stepCar(
   let vLong = s.vx * sinY + s.vz * cosY
   let vLat = s.vx * cosY - s.vz * sinY
   const absVLong = Math.max(Math.abs(vLong), 0.5)
+  const bodySlip = Math.atan2(vLat, absVLong)
 
   // --- sample surfaces per wheel ---
   const a = T.cgToFront, b = T.cgToRear
@@ -122,7 +123,13 @@ export function stepCar(
   // now lands a few times past the grip peak (still provokable) with the racing band
   // spread across the travel you actually use.
   const k = 1 - speedT
-  const steerMax = T.steerMaxHigh + (T.steerMaxLow - T.steerMaxHigh) * k * k * k
+  // Sideways, you need REAL lock to catch it — a drifting car is counter-steered near
+  // full lock, and the speed falloff above would deny exactly that, which is what makes
+  // a slide feel impossible to gather up. So restore lock in proportion to how sideways
+  // the car already is: full authority when drifting, precise mapping when racing
+  // straight (where slip is small and the falloff is what stops the understeer).
+  const catchBoost = 1 + clamp(Math.abs(bodySlip) / 0.35, 0, 1) * T.counterSteerBoost
+  const steerMax = (T.steerMaxHigh + (T.steerMaxLow - T.steerMaxHigh) * k * k * k) * catchBoost
   const delta = input.steer * steerMax
 
   // --- loads with pseudo longitudinal weight transfer ---
