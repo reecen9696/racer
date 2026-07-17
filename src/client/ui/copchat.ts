@@ -95,7 +95,8 @@ export class CopChat {
   tick(): void {
     if (!this.open) return
     const left = Math.max(0, this.deadline - performance.now() / 1000)
-    this.clock.textContent = String(Math.ceil(left))
+    const secs = Math.ceil(left)
+    this.clock.textContent = secs >= 60 ? `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}` : String(secs)
     this.clock.style.color = left < 15 ? '#ff7a6b' : '#7c86ad'
   }
 }

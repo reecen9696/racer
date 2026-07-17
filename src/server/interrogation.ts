@@ -27,7 +27,7 @@ export interface CopTurn {
 }
 
 export const MAX_TURNS = 12 // room to actually talk him round
-export const CHAT_TIME_LIMIT_S = 180
+export const CHAT_TIME_LIMIT_S = 540 // 9 min — time to actually talk him round
 export const RELEASE_AT = 75
 export const ARREST_AT = 4 // the instant-arrest floor: bribery still ends it, one bad line doesn't
 

@@ -34,8 +34,8 @@ export interface CopBrain {
   hitWhileParked: boolean
 }
 
-export const PIN_TIME = 5 // s pinned before interrogation
-export const PIN_DIST = 9.0 // m — he's holding you from a car's length back, not touching bumpers
+export const PIN_TIME = 3 // s pinned before interrogation
+export const PIN_DIST = 12.0 // m — he's got you boxed in, not touching bumpers
 export const COP_STOP_V = 3 // m/s — allowance ON TOP of the target's speed (see the pin gate)
 export const TARGET_STOP_V = 3.5 // 12.6 km/h — a slow roll still counts as pulled over
 export const PIN_DECAY = 0.6 // pinT bleed-off per second when the hold breaks (was 2/s,
