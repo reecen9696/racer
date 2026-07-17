@@ -209,17 +209,17 @@ export class GameAudio {
     const t = this.ctx.currentTime
     const rpm = car.rpm
 
-    // crossfade the loop bank around current RPM
+    // crossfade the loop bank around current RPM (pitched down ~2 semitones for a deeper voice)
     for (const v of this.loops) {
-      v.src.playbackRate.setTargetAtTime(rpm / v.nativeRpm, t, 0.03)
+      v.src.playbackRate.setTargetAtTime((rpm / v.nativeRpm) * 0.88, t, 0.03)
     }
     if (this.loops.length === 3) {
       const [a, b, c] = this.loops
       const x = Math.max(0, Math.min(1, (rpm - a.nativeRpm) / (b.nativeRpm - a.nativeRpm)))
       const y = Math.max(0, Math.min(1, (rpm - b.nativeRpm) / (c.nativeRpm - b.nativeRpm)))
-      a.gain.gain.setTargetAtTime(Math.cos(x * Math.PI * 0.5) * 0.5, t, 0.05)
-      b.gain.gain.setTargetAtTime((Math.sin(x * Math.PI * 0.5) * Math.cos(y * Math.PI * 0.5)) * 0.55, t, 0.05)
-      c.gain.gain.setTargetAtTime(Math.sin(y * Math.PI * 0.5) * 0.55, t, 0.05)
+      a.gain.gain.setTargetAtTime(Math.cos(x * Math.PI * 0.5) * 0.36, t, 0.05)
+      b.gain.gain.setTargetAtTime((Math.sin(x * Math.PI * 0.5) * Math.cos(y * Math.PI * 0.5)) * 0.4, t, 0.05)
+      c.gain.gain.setTargetAtTime(Math.sin(y * Math.PI * 0.5) * 0.4, t, 0.05)
     }
 
     // load split crossfade (~120 ms smoothing)
@@ -227,9 +227,9 @@ export class GameAudio {
     this.onGain.gain.setTargetAtTime(this.throttleSmooth, t, 0.05)
     this.offGain.gain.setTargetAtTime(1 - this.throttleSmooth * 0.8, t, 0.05)
 
-    // sub oscillator: 4 cylinders → firing freq = rpm/60 * 2
-    this.sub.frequency.setTargetAtTime((rpm / 60) * 2, t, 0.03)
-    this.subGain.gain.setTargetAtTime(0.10 + this.throttleSmooth * 0.08, t, 0.05)
+    // sub oscillator: 4 cylinders → firing freq = rpm/60 * 2 (× the same 0.88 pitch-down as the loops)
+    this.sub.frequency.setTargetAtTime((rpm / 60) * 2 * 0.88, t, 0.03)
+    this.subGain.gain.setTargetAtTime(0.12 + this.throttleSmooth * 0.09, t, 0.05)
 
     // screech from lateral slip past the grip peak (asphalt only)
     const surf = [car.surfFL, car.surfFR, car.surfRL, car.surfRR]

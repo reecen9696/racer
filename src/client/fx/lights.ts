@@ -106,7 +106,7 @@ void main() {
   gl_FragColor = vec4(uColor * a, a);
 }`
 
-export function makeHeadlightCone(length = 15, radius = 2.6): THREE.Mesh {
+export function makeHeadlightCone(length = 19, radius = 2.8): THREE.Mesh {
   const geo = new THREE.ConeGeometry(radius, length, 8, 4, true)
   // cone points along -Y by default with tip at +Y/2; rotate so it points +Z, root at origin
   geo.rotateX(-Math.PI / 2)
@@ -116,7 +116,7 @@ export function makeHeadlightCone(length = 15, radius = 2.6): THREE.Mesh {
     fragmentShader: CONE_FRAG,
     uniforms: {
       uColor: { value: new THREE.Color(1.0, 0.93, 0.72) },
-      uAlpha: { value: 0.5 },
+      uAlpha: { value: 0.62 },
       uLength: { value: length },
     },
     blending: THREE.AdditiveBlending,
@@ -173,19 +173,19 @@ export class HeadlightRig {
     this.reverseGlow.position.set(0, y, rear)
     this.group.add(this.reverseGlow)
 
-    this.pool = makePoolQuad(0xfff0c2, 9, 16, 0.6)
-    this.pool.position.set(0, 0.04, front + 6.5)
+    this.pool = makePoolQuad(0xfff0c2, 10, 20, 0.7)
+    this.pool.position.set(0, 0.04, front + 8.5)
     this.group.add(this.pool)
   }
 
   update(headlights: boolean, braking: boolean, reversing: boolean, mist: number): void {
     for (const c of this.cones) {
       c.visible = headlights
-      ;(c.material as THREE.ShaderMaterial).uniforms.uAlpha.value = 0.42 + mist * 0.22
+      ;(c.material as THREE.ShaderMaterial).uniforms.uAlpha.value = 0.55 + mist * 0.25
     }
-    for (const g of this.headGlows) (g.material as THREE.SpriteMaterial).opacity = headlights ? 0.9 : 0
+    for (const g of this.headGlows) (g.material as THREE.SpriteMaterial).opacity = headlights ? 1.0 : 0
     this.pool.visible = headlights
-    ;(this.pool.material as THREE.MeshBasicMaterial).opacity = 0.5 + mist * 0.15
+    ;(this.pool.material as THREE.MeshBasicMaterial).opacity = 0.62 + mist * 0.15
     // tail lights stay on regardless (lights-off cars must remain visible in MP)
     for (const g of this.tailGlows) (g.material as THREE.SpriteMaterial).opacity = headlights ? 0.7 : 0.35
     for (const g of this.brakeGlows) (g.material as THREE.SpriteMaterial).opacity = braking ? 0.85 : 0
