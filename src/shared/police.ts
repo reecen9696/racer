@@ -18,8 +18,11 @@ export interface CopBrain {
   disengageT: number // s target has been out of range
   cooldownT: number // s remaining before patrol resumes aggro checks
   stuckT: number // s of no progress
+  stuckTries: number // reverse attempts — alternates the steer lock
   reverseT: number // s remaining of reverse-recovery
-  noProgressT: number // s since the patrol waypoint last advanced — arms the unwedge
+  wedgeT: number // s since he last actually moved — arms the unwedge
+  lastX: number // last position that counted as progress
+  lastZ: number
   tick: number
   // per-player memory: session offense counts (feeds interrogation facts + opening disposition)
   offenses: Map<string, number>
@@ -41,7 +44,10 @@ export const AGGRO_IMPULSE = 3.5 // m/s impact speed from collideCarPair to trig
 export const DISENGAGE_DIST = 150
 export const DISENGAGE_TIME = 10
 export const ARREST_IMMUNITY = 120 // s
-export const UNWEDGE_TIME = 14 // s of zero patrol progress before he's lifted back onto the ring
+export const UNWEDGE_TIME = 12 // s wedged with someone nearby before he's lifted back onto the ring
+export const UNWEDGE_UNSEEN = 4 // ...but if nobody's near enough to see it, don't make them wait
+export const UNSEEN_DIST = 70 // m — beyond this the teleport is nobody's business
+export const WEDGE_PROGRESS = 6 // m of real travel that counts as "he's moving again"
 
 const PATROL_SPEED = 13 // m/s ≈ 47 km/h
 const PURSUIT_SPEED = 46 // just under player maxSpeed; rubber band does the rest
@@ -122,8 +128,11 @@ export function makeCopBrain(map: ParsedMap): CopBrain {
     disengageT: 0,
     cooldownT: 0,
     stuckT: 0,
+    stuckTries: 0,
     reverseT: 0,
-    noProgressT: 0,
+    wedgeT: 0,
+    lastX: 0,
+    lastZ: 0,
     tick: 0,
     offenses: new Map(),
     immunity: new Map(),
@@ -208,7 +217,6 @@ export function stepCopBrain(
 
   if (brain.mode === 'interrogate') {
     // frozen: the room zeroes velocities; brain just idles
-    brain.noProgressT = 0
     return { input, pinnedNow: false }
   }
 
@@ -217,18 +225,76 @@ export function stepCopBrain(
     if (brain.cooldownT <= 0) brain.mode = 'patrol'
   }
 
-  // --- stuck detection & reverse recovery (both modes) ---
+  // --- wedge watchdog ---
+  // Measured on REAL DISPLACEMENT, not the waypoint index. The index is worthless
+  // here: `reached()` also accepts a waypoint that's merely *behind* him, so a cop
+  // spun around against a wall chews through waypoints without moving an inch and
+  // resets the timer forever — which is exactly how he stayed stuck. This block sits
+  // ahead of the reverse-recovery return so it keeps ticking during recovery too.
+  // Nearest player: gates both the "is anyone watching" teleport and the hold check.
+  let nearest = Infinity
+  for (const t of players.values()) nearest = Math.min(nearest, dist(cop.x, cop.z, t.x, t.z))
+  // Skipped whenever he's SUPPOSED to be stationary — mid-pin, or crawling the last
+  // few metres onto a stopped target. Standing still there is the job, not a wedge;
+  // without this he teleports away in the middle of pulling you over.
+  const holding = brain.pinT > 0 || (brain.mode === 'pursuit' && nearest < PIN_DIST * 3)
+  if (holding) {
+    brain.wedgeT = 0
+    brain.lastX = cop.x
+    brain.lastZ = cop.z
+  } else {
+    if (dist(cop.x, cop.z, brain.lastX, brain.lastZ) > WEDGE_PROGRESS) {
+      brain.lastX = cop.x
+      brain.lastZ = cop.z
+      brain.wedgeT = 0
+    } else {
+      brain.wedgeT += dt
+    }
+    // a teleport nobody witnesses is free; one in front of a player is jarring, so
+    // give the reverse-recovery longer to work it out while someone is watching
+    if (brain.wedgeT > (nearest > UNSEEN_DIST ? UNWEDGE_UNSEEN : UNWEDGE_TIME)) {
+      const n0 = brain.path.length
+      let best = 0
+      let bestD = Infinity
+      for (let k = 0; k < n0; k++) {
+        const d = dist(cop.x, cop.z, brain.path[k].x, brain.path[k].z)
+        if (d < bestD) { bestD = d; best = k }
+      }
+      const a = brain.path[best]
+      const b = brain.path[(best + 1) % n0]
+      cop.x = a.x
+      cop.z = a.z
+      cop.yaw = Math.atan2(b.x - a.x, b.z - a.z)
+      cop.vx = 0
+      cop.vz = 0
+      cop.yawRate = 0
+      brain.wpIndex = (best + 1) % n0
+      brain.lastX = cop.x
+      brain.lastZ = cop.z
+      brain.wedgeT = 0
+      brain.stuckT = 0
+      brain.reverseT = 0
+    }
+  }
+
+  // --- reverse recovery ---
   if (brain.reverseT > 0) {
     brain.reverseT -= dt
-    input.brake = 0.7 // brake past standstill = reverse in this physics
-    input.steer = -steerToward(cop, brain.path[brain.wpIndex].x, brain.path[brain.wpIndex].z)
+    input.brake = 1 // full: brake past standstill = reverse in this physics
+    // alternate the steer each attempt — repeating the same lock just re-wedges him
+    const wp0 = brain.path[brain.wpIndex]
+    input.steer = (brain.stuckTries % 2 === 0 ? -1 : 1) * Math.abs(steerToward(cop, wp0.x, wp0.z)) || 0.6
     return { input, pinnedNow: false }
   }
-  const wantsMotion = brain.mode === 'pursuit' || brain.mode === 'patrol' || brain.mode === 'cooldown'
+  // `holding` again: creeping onto a stopped target is under 0.7 m/s by design, and
+  // without this the recovery reads it as a wedge and reverses him away from the
+  // driver he's trying to pull over — he'd stall ~8 m short and never pin.
+  const wantsMotion = !holding && (brain.mode === 'pursuit' || brain.mode === 'patrol' || brain.mode === 'cooldown')
   if (wantsMotion && Math.abs(cop.speed) < 0.7) {
     brain.stuckT += dt
-    if (brain.stuckT > 2.5) {
-      brain.reverseT = 1.1
+    if (brain.stuckT > 1.6) {
+      brain.reverseT = 1.8 // longer + full lock: 0.7 brake barely backed him off
+      brain.stuckTries++
       brain.stuckT = 0
     }
   } else {
@@ -236,7 +302,6 @@ export function stepCopBrain(
   }
 
   if (brain.mode === 'pursuit') {
-    brain.noProgressT = 0 // patrol progress is meaningless while chasing
     const target = players.get(brain.targetId)
     if (!target) {
       brain.mode = 'cooldown'
@@ -300,34 +365,6 @@ export function stepCopBrain(
   }
 
   // --- patrol / cooldown driving ---
-  // Hard watchdog: reverse-recovery handles a simple nose-in, but he can still end up
-  // genuinely wedged (pinned on a prop, or sawing between two waypoints) and a cop
-  // stuck in a hedge for the rest of the session is worse than a teleport. Measured as
-  // patrol PROGRESS, not speed, so oscillating-in-place counts as stuck too.
-  const wpBefore = brain.wpIndex
-  brain.noProgressT += dt
-  if (brain.noProgressT > UNWEDGE_TIME) {
-    const n0 = brain.path.length
-    let best = brain.wpIndex
-    let bestD = Infinity
-    for (let k = 0; k < n0; k++) {
-      const d = dist(cop.x, cop.z, brain.path[k].x, brain.path[k].z)
-      if (d < bestD) { bestD = d; best = k }
-    }
-    const a = brain.path[best]
-    const b = brain.path[(best + 1) % n0]
-    cop.x = a.x
-    cop.z = a.z
-    cop.yaw = Math.atan2(b.x - a.x, b.z - a.z)
-    cop.vx = 0
-    cop.vz = 0
-    cop.yawRate = 0
-    brain.wpIndex = (best + 1) % n0
-    brain.noProgressT = 0
-    brain.stuckT = 0
-    brain.reverseT = 0
-  }
-
   let wp = brain.path[brain.wpIndex]
   // Advance when reached, or when it's slipped behind him (overshot on a corner) —
   // the dirt samples sit ~3 m apart, so the radius must stay under that or he skips
@@ -342,7 +379,6 @@ export function stepCopBrain(
     brain.wpIndex = (brain.wpIndex + 1) % brain.path.length
     wp = brain.path[brain.wpIndex]
   }
-  if (brain.wpIndex !== wpBefore) brain.noProgressT = 0 // he's moving along the ring
   // Curvature over a speed-scaled lookahead window, not just the next waypoint:
   // the samples sit ~3 m apart, so one-ahead is ~0.2 s of warning at patrol speed
   // and he arrives at a 7.8 m corner arc still doing 54 km/h. Roughly 1.8 s of
