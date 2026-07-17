@@ -1,0 +1,250 @@
+// Vehicle + world audio (Part 6): RPM-crossfaded loop bank + synth sub-layer +
+// throttle load split, synthesized tire screech (no sample exists in the packs),
+// offroad rumble, impacts, horn, and the gapless music loop.
+import { CarState } from '../../shared/physics'
+import { TUNING } from '../../shared/constants'
+
+async function fetchBuffer(ctx: AudioContext, url: string): Promise<AudioBuffer> {
+  const res = await fetch(url)
+  const arr = await res.arrayBuffer()
+  return ctx.decodeAudioData(arr)
+}
+
+interface LoopVoice {
+  src: AudioBufferSourceNode
+  gain: GainNode
+  nativeRpm: number
+}
+
+export class GameAudio {
+  ctx: AudioContext
+  master: GainNode
+  vehicleBus: GainNode
+  musicBus: GainNode
+  private loops: LoopVoice[] = []
+  private sub!: OscillatorNode
+  private subGain!: GainNode
+  private onGain!: GainNode // on-throttle path (waveshaped)
+  private offGain!: GainNode // off-throttle path (lowpassed)
+  private screech!: GainNode
+  private screechFilter!: BiquadFilterNode
+  private rumble!: GainNode
+  private hornBuf: AudioBuffer | null = null
+  private brakeBuf: AudioBuffer | null = null
+  private throttleSmooth = 0
+  ready = false
+
+  constructor() {
+    this.ctx = new AudioContext()
+    this.master = this.ctx.createGain()
+    this.master.gain.value = 0.8
+    const comp = this.ctx.createDynamicsCompressor()
+    comp.threshold.value = -12
+    comp.ratio.value = 6
+    this.master.connect(comp)
+    comp.connect(this.ctx.destination)
+    this.vehicleBus = this.ctx.createGain()
+    this.vehicleBus.gain.value = 0.9
+    this.vehicleBus.connect(this.master)
+    this.musicBus = this.ctx.createGain()
+    this.musicBus.gain.value = 0.16 // ~-18 dB under the vehicle bus
+    this.musicBus.connect(this.master)
+  }
+
+  async init(): Promise<void> {
+    const ctx = this.ctx
+    await ctx.resume()
+
+    // --- music: decode → looping buffer source (sample-accurate, gapless) ---
+    fetchBuffer(ctx, '/assets/audio/background-loop.mp3').then((buf) => {
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.loop = true
+      src.connect(this.musicBus)
+      src.start()
+    })
+
+    // --- engine loop bank: 3 bands, pitch-tracked, equal-power crossfade ---
+    const [idle, low, high] = await Promise.all([
+      fetchBuffer(ctx, '/assets/audio/car/Car_Engine_Loop.ogg'),
+      fetchBuffer(ctx, '/assets/audio/car/Car_Engine_Loop_2.ogg'),
+      fetchBuffer(ctx, '/assets/audio/car/Car2_Engine_Loop.ogg'),
+    ])
+
+    // load split: on-throttle → soft saturation, off-throttle → lowpass
+    const shaper = ctx.createWaveShaper()
+    const curve = new Float32Array(256)
+    for (let i = 0; i < 256; i++) {
+      const x = (i / 255) * 2 - 1
+      curve[i] = Math.tanh(x * 1.8)
+    }
+    shaper.curve = curve
+    this.onGain = ctx.createGain()
+    this.onGain.gain.value = 0
+    this.onGain.connect(shaper)
+    shaper.connect(this.vehicleBus)
+
+    const offLp = ctx.createBiquadFilter()
+    offLp.type = 'lowpass'
+    offLp.frequency.value = 900
+    this.offGain = ctx.createGain()
+    this.offGain.gain.value = 1
+    this.offGain.connect(offLp)
+    offLp.connect(this.vehicleBus)
+
+    const bands: Array<[AudioBuffer, number]> = [
+      [idle, 1700],
+      [low, 3300],
+      [high, 5600],
+    ]
+    for (const [buf, nativeRpm] of bands) {
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.loop = true
+      const gain = ctx.createGain()
+      gain.gain.value = 0
+      src.connect(gain)
+      gain.connect(this.onGain)
+      gain.connect(this.offGain)
+      src.start()
+      this.loops.push({ src, gain, nativeRpm })
+    }
+
+    // synth sub-layer: the chest of the sound. f = RPM/60 × cyl/2
+    this.sub = ctx.createOscillator()
+    this.sub.type = 'triangle'
+    const subLp = ctx.createBiquadFilter()
+    subLp.type = 'lowpass'
+    subLp.frequency.value = 220
+    this.subGain = ctx.createGain()
+    this.subGain.gain.value = 0.12
+    this.sub.connect(subLp)
+    subLp.connect(this.subGain)
+    this.subGain.connect(this.vehicleBus)
+    this.sub.start()
+
+    // synthesized screech: looped noise → resonant bandpass
+    const noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 1.5, ctx.sampleRate)
+    const data = noiseBuf.getChannelData(0)
+    let lp = 0
+    for (let i = 0; i < data.length; i++) {
+      const w = Math.random() * 2 - 1
+      lp += (w - lp) * 0.25
+      data[i] = lp * 2.2
+    }
+    const noise = ctx.createBufferSource()
+    noise.buffer = noiseBuf
+    noise.loop = true
+    this.screechFilter = ctx.createBiquadFilter()
+    this.screechFilter.type = 'bandpass'
+    this.screechFilter.frequency.value = 2300
+    this.screechFilter.Q.value = 5
+    this.screech = ctx.createGain()
+    this.screech.gain.value = 0
+    noise.connect(this.screechFilter)
+    this.screechFilter.connect(this.screech)
+    this.screech.connect(this.vehicleBus)
+    noise.start()
+
+    // offroad rumble: same noise, low band
+    const rumbleFilter = ctx.createBiquadFilter()
+    rumbleFilter.type = 'lowpass'
+    rumbleFilter.frequency.value = 260
+    this.rumble = ctx.createGain()
+    this.rumble.gain.value = 0
+    noise.connect(rumbleFilter)
+    rumbleFilter.connect(this.rumble)
+    this.rumble.connect(this.vehicleBus)
+
+    fetchBuffer(ctx, '/assets/audio/car/Car_Horn.ogg').then((b) => (this.hornBuf = b))
+    fetchBuffer(ctx, '/assets/audio/car/Car_Parking_Brake.ogg').then((b) => (this.brakeBuf = b))
+
+    this.ready = true
+  }
+
+  private playOneShot(buf: AudioBuffer | null, gain = 1, rate = 1): void {
+    if (!buf) return
+    const src = this.ctx.createBufferSource()
+    src.buffer = buf
+    src.playbackRate.value = rate
+    const g = this.ctx.createGain()
+    g.gain.value = gain
+    src.connect(g)
+    g.connect(this.vehicleBus)
+    src.start()
+  }
+
+  horn(): void {
+    this.playOneShot(this.hornBuf, 0.8)
+  }
+
+  handbrakePull(): void {
+    this.playOneShot(this.brakeBuf, 0.5)
+  }
+
+  crash(intensity: number): void {
+    // filtered noise burst — no crash sample in the packs
+    const ctx = this.ctx
+    const dur = 0.25
+    const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate)
+    const d = buf.getChannelData(0)
+    for (let i = 0; i < d.length; i++) {
+      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 2)
+    }
+    const src = ctx.createBufferSource()
+    src.buffer = buf
+    const f = ctx.createBiquadFilter()
+    f.type = 'lowpass'
+    f.frequency.value = 700 + intensity * 300
+    const g = ctx.createGain()
+    g.gain.value = Math.min(0.9, 0.25 + intensity * 0.1)
+    src.connect(f)
+    f.connect(g)
+    g.connect(this.vehicleBus)
+    src.start()
+  }
+
+  update(car: CarState, throttle: number, drifting: boolean, dt: number): void {
+    if (!this.ready) return
+    const t = this.ctx.currentTime
+    const rpm = car.rpm
+
+    // crossfade the loop bank around current RPM
+    for (const v of this.loops) {
+      v.src.playbackRate.setTargetAtTime(rpm / v.nativeRpm, t, 0.03)
+    }
+    if (this.loops.length === 3) {
+      const [a, b, c] = this.loops
+      const x = Math.max(0, Math.min(1, (rpm - a.nativeRpm) / (b.nativeRpm - a.nativeRpm)))
+      const y = Math.max(0, Math.min(1, (rpm - b.nativeRpm) / (c.nativeRpm - b.nativeRpm)))
+      a.gain.gain.setTargetAtTime(Math.cos(x * Math.PI * 0.5) * 0.5, t, 0.05)
+      b.gain.gain.setTargetAtTime((Math.sin(x * Math.PI * 0.5) * Math.cos(y * Math.PI * 0.5)) * 0.55, t, 0.05)
+      c.gain.gain.setTargetAtTime(Math.sin(y * Math.PI * 0.5) * 0.55, t, 0.05)
+    }
+
+    // load split crossfade (~120 ms smoothing)
+    this.throttleSmooth += (throttle - this.throttleSmooth) * Math.min(1, dt / 0.12)
+    this.onGain.gain.setTargetAtTime(this.throttleSmooth, t, 0.05)
+    this.offGain.gain.setTargetAtTime(1 - this.throttleSmooth * 0.8, t, 0.05)
+
+    // sub oscillator: 4 cylinders → firing freq = rpm/60 * 2
+    this.sub.frequency.setTargetAtTime((rpm / 60) * 2, t, 0.03)
+    this.subGain.gain.setTargetAtTime(0.10 + this.throttleSmooth * 0.08, t, 0.05)
+
+    // screech from lateral slip past the grip peak (asphalt only)
+    const surf = [car.surfFL, car.surfFR, car.surfRL, car.surfRR]
+    const onAsphalt = surf.filter((s) => s === 'asphalt' || s === 'curb').length >= 2
+    const slip = Math.max(Math.abs(car.slipRear) - TUNING.peakSlipRear, 0)
+    const speed = Math.abs(car.speed)
+    const screechAmt = onAsphalt && speed > 4 ? Math.min(0.5, slip * 2.2) * Math.min(1, speed / 12) : 0
+    this.screech.gain.setTargetAtTime(screechAmt * (drifting ? 1 : 0.7), t, 0.04)
+    this.screechFilter.frequency.setTargetAtTime(2100 + Math.abs(car.slipAngle) * 900, t, 0.05)
+
+    // offroad rumble keyed to speed
+    const offWheels = surf.filter((s) => s === 'offroad').length + surf.filter((s) => s === 'dirt').length * 0.6
+    this.rumble.gain.setTargetAtTime(offWheels > 0 ? Math.min(0.4, (speed / 25) * (offWheels / 4)) : 0, t, 0.06)
+
+    // music ducks ~3 dB while mid-drift-chain, swells back between runs
+    this.musicBus.gain.setTargetAtTime(drifting ? 0.11 : 0.16, t, 0.6)
+  }
+}

@@ -1,0 +1,5 @@
+node_modules
+public/assets
+build
+.colyseus-cloud.json
+.DS_Store

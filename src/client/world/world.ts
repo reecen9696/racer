@@ -1,0 +1,501 @@
+// Builds the visible world from the parsed map: instanced road tiles, baked-vertex
+// ground, props, lamp posts. Also owns the light list used to tint everything.
+import * as THREE from 'three'
+import { TILE } from '../../shared/constants'
+import { ParsedMap, Lamp, Prop, RoadTile, hash2, dirtCenterlinePoint } from '../../shared/map'
+import { loadGLB, loadFBX, loadTexture, LoadedModel } from './assets'
+import { patchMaterial, psxTexture } from '../renderer/patch'
+
+// Night ambient: never pure black — everything silhouettes against the sky.
+const AMBIENT = new THREE.Color(0.64, 0.68, 0.86)
+
+export class World {
+  group = new THREE.Group()
+  map: ParsedMap
+
+  constructor(map: ParsedMap) {
+    this.map = map
+  }
+
+  // baked light sample: ambient + sum of lamp contributions (used for ground bake,
+  // per-tile road tint, per-prop tint, and per-frame car tint)
+  lampTintAt(x: number, z: number, out: THREE.Color, ambientScale = 1): THREE.Color {
+    out.copy(AMBIENT).multiplyScalar(ambientScale)
+    for (const l of this.map.lamps) {
+      const dx = x - l.x, dz = z - l.z
+      const d2 = dx * dx + dz * dz
+      if (d2 > l.radius * l.radius) continue
+      const f = 1 - Math.sqrt(d2) / l.radius
+      const k = f * f * l.intensity * 2.6
+      out.r += l.color[0] * k
+      out.g += l.color[1] * k
+      out.b += l.color[2] * k
+    }
+    return out
+  }
+
+  async build(): Promise<void> {
+    await Promise.all([
+      this.buildGround(),
+      this.buildRoads(),
+      this.buildLampPosts(),
+      this.buildProps(),
+    ])
+  }
+
+  private async buildGround(): Promise<void> {
+    // procedural dark grass texture (docs: favor darker/bluer variants at night)
+    const c = document.createElement('canvas')
+    c.width = c.height = 64
+    const ctx = c.getContext('2d')!
+    for (let y = 0; y < 64; y++) {
+      for (let x = 0; x < 64; x++) {
+        const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453
+        const r = n - Math.floor(n)
+        const g = 80 + r * 34
+        ctx.fillStyle = `rgb(${(g * 0.55) | 0},${g | 0},${(g * 0.62) | 0})`
+        ctx.fillRect(x, y, 1, 1)
+      }
+    }
+    const grassTex = psxTexture(new THREE.CanvasTexture(c))
+    grassTex.wrapS = grassTex.wrapT = THREE.RepeatWrapping
+    grassTex.colorSpace = THREE.SRGBColorSpace
+
+    const b = this.map.bounds
+    const w = b.maxX - b.minX
+    const d = b.maxZ - b.minZ
+    const segX = Math.round(w / 4) // ~4 m tessellation: affine control + vertex-light pools
+    const segZ = Math.round(d / 4)
+    const geo = new THREE.PlaneGeometry(w, d, segX, segZ)
+    geo.rotateX(-Math.PI / 2)
+    geo.translate(b.minX + w / 2, -0.06, b.minZ + d / 2)
+
+    // scale UVs so the grass tiles at ~4 m
+    const uvs = geo.attributes.uv as THREE.BufferAttribute
+    for (let i = 0; i < uvs.count; i++) uvs.setXY(i, uvs.getX(i) * (w / 4), uvs.getY(i) * (d / 4))
+
+    // THE vertex-color bake (Part 1 §5.1) on our freely-tessellated ground
+    // + elevation: ground vertices follow the terrain height field
+    const pos = geo.attributes.position as THREE.BufferAttribute
+    const colors = new Float32Array(pos.count * 3)
+    const tint = new THREE.Color()
+    const mx = 0.42, my = 0.78, mz = -0.46 // moon direction for baked slope shading
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), z = pos.getZ(i)
+      const h = this.map.heightAt(x, z)
+      pos.setY(i, h - 0.06)
+      this.lampTintAt(x, z, tint)
+      // fake Gouraud moonlight on the terrain: slopes facing the moon lighten,
+      // far sides darken — without this, hills read as black voids at night
+      const gx = (this.map.heightAt(x + 2, z) - this.map.heightAt(x - 2, z)) / 4
+      const gz = (this.map.heightAt(x, z + 2) - this.map.heightAt(x, z - 2)) / 4
+      const inv = 1 / Math.sqrt(gx * gx + 1 + gz * gz)
+      const dot = (-gx * mx + my - gz * mz) * inv
+      const shade = (0.62 + 0.55 * Math.max(0, dot)) * (1 + h * 0.035)
+      colors[i * 3] = tint.r * shade
+      colors[i * 3 + 1] = tint.g * shade
+      colors[i * 3 + 2] = tint.b * shade
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+
+    const mat = new THREE.MeshBasicMaterial({ map: grassTex, vertexColors: true })
+    patchMaterial(mat)
+    const ground = new THREE.Mesh(geo, mat)
+    this.group.add(ground)
+  }
+
+  private pieceFile(piece: RoadTile['piece']): string {
+    switch (piece) {
+      case 'straight': return 'Road_Straight.glb'
+      case 'corner': return 'Road_Corner.glb'
+      case 't': return 'Road_T.glb'
+      case 'cross': return 'Road_Cross.glb'
+      case 'end': return 'Road_End.glb'
+    }
+  }
+
+  // Rotation offset between our neighbor-inference convention and how each GLB is
+  // authored. Filled in after visual verification.
+  static ROT_FIX: Record<string, number> = {
+    straight: Math.PI / 2, // GLB road runs along model X; our rot 0 = road along Z
+    corner: -Math.PI / 2, // GLB corner connects N+W at rot 0; our rot 0 = N+E
+    t: 0,
+    cross: 0,
+    end: 0,
+  }
+
+  // Road_Straight is 13.0 long against the 15.57 corner pitch — stretch along the
+  // road axis (model X) so consecutive tiles join without gaps.
+  static PIECE_SCALE: Record<string, [number, number, number]> = {
+    straight: [TILE / 13.0, 1, 1],
+  }
+
+  private async buildRoads(): Promise<void> {
+    this.buildDirtRoad()
+    const byPiece = new Map<string, RoadTile[]>()
+    for (const t of this.map.tiles) {
+      if (t.dirt) continue // elevated section is the draped dirt ribbon instead
+      const arr = byPiece.get(t.piece) ?? []
+      arr.push(t)
+      byPiece.set(t.piece, arr)
+    }
+    const tint = new THREE.Color()
+    for (const [piece, tiles] of byPiece) {
+      const model = await loadGLB('/assets/roads/' + this.pieceFile(piece as RoadTile['piece']))
+      // The pack's GLB nodes carry a scene-layout translation (e.g. x≈163, y≈-0.31);
+      // recenter the whole piece so its footprint center sits on the tile center at y≈0.
+      const bbox = new THREE.Box3().setFromObject(model.object)
+      const center = bbox.getCenter(new THREE.Vector3())
+      const pre = new THREE.Matrix4().makeTranslation(-center.x, -bbox.min.y - 0.04, -center.z)
+      for (const part of model.meshes) {
+        const inst = new THREE.InstancedMesh(part.geometry, part.material, tiles.length)
+        const m = new THREE.Matrix4()
+        const q = new THREE.Quaternion()
+        const up = new THREE.Vector3(0, 1, 0)
+        const ps = World.PIECE_SCALE[piece] ?? [1, 1, 1]
+        const qSlope = new THREE.Quaternion()
+        tiles.forEach((t, i) => {
+          q.setFromAxisAngle(up, t.rot + World.ROT_FIX[piece])
+          // elevation: lift to center height; straights additionally pitch so
+          // consecutive tiles meet at the shared edge heights
+          if (t.piece === 'straight') {
+            if (t.dirs.n || t.dirs.s) {
+              qSlope.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.atan2(t.elev.s - t.elev.n, TILE))
+            } else {
+              qSlope.setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.atan2(t.elev.e - t.elev.w, TILE))
+            }
+            q.premultiply(qSlope)
+          }
+          m.compose(new THREE.Vector3(t.x, t.elev.c, t.z), q, new THREE.Vector3(ps[0], ps[1], ps[2]))
+          m.multiply(pre)
+          m.multiply(part.matrix)
+          inst.setMatrixAt(i, m)
+          // coarse per-tile lamp tint (PS1-coarse is period-correct; pools come from sprites)
+          this.lampTintAt(t.x, t.z, tint)
+          inst.setColorAt(i, tint)
+        })
+        inst.instanceMatrix.needsUpdate = true
+        if (inst.instanceColor) inst.instanceColor.needsUpdate = true
+        inst.frustumCulled = false // instance bounds are origin-centered; culling eats the whole batch
+        this.group.add(inst)
+      }
+    }
+  }
+
+  private async buildLampPosts(): Promise<void> {
+    // procedural 30-tri lamppost: pole + arm + head. The glow sprite does the real work.
+    const poleGeo = new THREE.CylinderGeometry(0.09, 0.13, 5.2, 5)
+    poleGeo.translate(0, 2.6, 0)
+    const armGeo = new THREE.BoxGeometry(0.14, 0.12, 1.4)
+    armGeo.translate(0, 5.15, 0.6)
+    const headGeo = new THREE.BoxGeometry(0.3, 0.16, 0.55)
+    headGeo.translate(0, 5.05, 1.15)
+
+    const lampProps = this.map.props.filter((p) => p.kind === 'lampProp')
+    const dark = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.05, 0.055, 0.075) })
+    patchMaterial(dark)
+    const head = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.0, 0.75, 0.42) }) // emissive head, fullbright
+    patchMaterial(head)
+
+    const q = new THREE.Quaternion()
+    const up = new THREE.Vector3(0, 1, 0)
+    const m = new THREE.Matrix4()
+    for (const [geo, mat] of [
+      [poleGeo, dark],
+      [armGeo, dark],
+      [headGeo, head],
+    ] as const) {
+      const inst = new THREE.InstancedMesh(geo, mat, lampProps.length)
+      lampProps.forEach((p, i) => {
+        q.setFromAxisAngle(up, p.rot)
+        m.compose(new THREE.Vector3(p.x, this.map.heightAt(p.x, p.z), p.z), q, new THREE.Vector3(1, 1, 1))
+        inst.setMatrixAt(i, m)
+      })
+      inst.instanceMatrix.needsUpdate = true
+      inst.frustumCulled = false
+      this.group.add(inst)
+    }
+  }
+
+  private placeClones(
+    model: LoadedModel,
+    props: Prop[],
+    opts: { targetHeight?: number; targetWidth?: number; targetSize?: { x?: number; y?: number; z?: number }; tintAmbient?: number; tint?: boolean } = {},
+  ): void {
+    if (!props.length) return
+    const bbox = new THREE.Box3().setFromObject(model.object)
+    const size = bbox.getSize(new THREE.Vector3())
+    const center = bbox.getCenter(new THREE.Vector3())
+    let sx = 1, sy = 1, sz = 1
+    if (opts.targetSize) {
+      sy = opts.targetSize.y ? opts.targetSize.y / size.y : 1
+      sx = opts.targetSize.x ? opts.targetSize.x / size.x : sy
+      sz = opts.targetSize.z ? opts.targetSize.z / size.z : sy
+    } else if (opts.targetHeight) {
+      sx = sy = sz = opts.targetHeight / size.y
+    } else if (opts.targetWidth) {
+      sx = sy = sz = opts.targetWidth / Math.max(size.x, size.z)
+    }
+    const tint = new THREE.Color()
+    for (const p of props) {
+      // wrapper carries placement; inner clone is recentered so authored scene
+      // offsets (some packs export pieces far from origin) don't displace props
+      const wrapper = new THREE.Group()
+      wrapper.position.set(p.x, this.map.heightAt(p.x, p.z), p.z)
+      wrapper.rotation.y = p.rot
+      const clone = model.object.clone()
+      clone.scale.set(sx, sy, sz)
+      clone.position.set(-center.x * sx, -bbox.min.y * sy, -center.z * sz)
+      wrapper.add(clone)
+      if (opts.tint !== false) {
+        this.lampTintAt(p.x, p.z, tint, opts.tintAmbient ?? 1)
+        clone.traverse((o) => {
+          const mesh = o as THREE.Mesh
+          if (!mesh.isMesh) return
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+          mesh.material = mats.length === 1 ? mats[0].clone() : mats.map((mm) => mm.clone())
+          const outMats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+          for (const mm of outMats) {
+            ;(mm as THREE.MeshBasicMaterial).color?.copy(tint)
+          }
+        })
+      }
+      this.group.add(wrapper)
+    }
+  }
+
+  // Instanced variant of placeClones for high-count vegetation: one InstancedMesh
+  // per mesh part, per-instance lamp tint via instanceColor.
+  private placeInstanced(
+    model: LoadedModel,
+    props: Prop[],
+    opts: { targetHeight?: number; targetWidth?: number; tintAmbient?: number } = {},
+  ): void {
+    if (!props.length) return
+    const bbox = new THREE.Box3().setFromObject(model.object)
+    const size = bbox.getSize(new THREE.Vector3())
+    const center = bbox.getCenter(new THREE.Vector3())
+    let scale = 1
+    if (opts.targetHeight) scale = opts.targetHeight / size.y
+    else if (opts.targetWidth) scale = opts.targetWidth / Math.max(size.x, size.z)
+    const tint = new THREE.Color()
+    const m = new THREE.Matrix4()
+    const q = new THREE.Quaternion()
+    const up = new THREE.Vector3(0, 1, 0)
+    const off = new THREE.Matrix4()
+    const sc = new THREE.Matrix4()
+    for (const part of model.meshes) {
+      const inst = new THREE.InstancedMesh(part.geometry, part.material, props.length)
+      props.forEach((p, i) => {
+        const s2 = scale * (0.75 + hash2(Math.round(p.x * 7), Math.round(p.z * 7), 5) * 0.55)
+        q.setFromAxisAngle(up, p.rot)
+        m.compose(new THREE.Vector3(p.x, this.map.heightAt(p.x, p.z), p.z), q, new THREE.Vector3(1, 1, 1))
+        off.makeTranslation(-center.x * s2, -bbox.min.y * s2, -center.z * s2)
+        sc.makeScale(s2, s2, s2)
+        m.multiply(off)
+        m.multiply(sc)
+        m.multiply(part.matrix)
+        inst.setMatrixAt(i, m)
+        this.lampTintAt(p.x, p.z, tint, opts.tintAmbient ?? 1)
+        inst.setColorAt(i, tint)
+      })
+      inst.instanceMatrix.needsUpdate = true
+      if (inst.instanceColor) inst.instanceColor.needsUpdate = true
+      inst.frustumCulled = false
+      this.group.add(inst)
+    }
+  }
+
+  // terrain-draped dirt road for the elevated section: rigid GLB tiles can't bend,
+  // so slopes get a generated ribbon that follows heightAt exactly.
+  private buildDirtRoad(): void {
+    const dirtTiles = this.map.tiles.filter((t) => t.dirt)
+    if (!dirtTiles.length) return
+    // procedural dirt texture with faint wheel tracks
+    const c = document.createElement('canvas')
+    c.width = c.height = 64
+    const ctx = c.getContext('2d')!
+    for (let y = 0; y < 64; y++) {
+      for (let x = 0; x < 64; x++) {
+        const n = Math.sin(x * 91.7 + y * 47.3) * 43758.5453
+        const r = n - Math.floor(n)
+        let v = 105 + r * 32
+        const u = x / 64
+        if (Math.abs(u - 0.28) < 0.09 || Math.abs(u - 0.72) < 0.09) v -= 14 // wheel ruts
+        ctx.fillStyle = `rgb(${(v * 1.0) | 0},${(v * 0.82) | 0},${(v * 0.6) | 0})`
+        ctx.fillRect(x, y, 1, 1)
+      }
+    }
+    const dirtTex = psxTexture(new THREE.CanvasTexture(c))
+    dirtTex.wrapS = dirtTex.wrapT = THREE.RepeatWrapping
+    dirtTex.colorSpace = THREE.SRGBColorSpace
+
+    const positions: number[] = []
+    const uvs: number[] = []
+    const colors: number[] = []
+    const indices: number[] = []
+    const tint = new THREE.Color()
+    const halfW = 5.2
+    const pushVert = (x: number, z: number, u: number, v: number): number => {
+      const y = this.map.heightAt(x, z) + 0.06
+      this.lampTintAt(x, z, tint)
+      positions.push(x, y, z)
+      uvs.push(u, v)
+      colors.push(tint.r, tint.g, tint.b)
+      return positions.length / 3 - 1
+    }
+    for (const t of this.map.tiles.filter((tt) => tt.dirt)) {
+      // sweep a strip along the shared curved centerline (S on straights, arc on corners)
+      const steps = t.piece === 'corner' ? 12 : 8
+      let prevA = -1, prevB = -1
+      for (let k = 0; k <= steps; k++) {
+        const u = k / steps
+        const [cx, cz] = dirtCenterlinePoint(t, u)
+        const [nx2, nz2] = dirtCenterlinePoint(t, Math.min(1, u + 0.01))
+        const [px2, pz2] = dirtCenterlinePoint(t, Math.max(0, u - 0.01))
+        let tx = nx2 - px2, tz = nz2 - pz2
+        const tl = Math.hypot(tx, tz) || 1
+        tx /= tl
+        tz /= tl
+        const px = -tz, pz = tx // perpendicular
+        const ia = pushVert(cx - px * halfW, cz - pz * halfW, 0, u * TILE / 4)
+        const ib = pushVert(cx + px * halfW, cz + pz * halfW, 2.6, u * TILE / 4)
+        if (prevA >= 0) indices.push(prevA, ia, prevB, prevB, ia, ib)
+        prevA = ia
+        prevB = ib
+      }
+    }
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+    geo.setIndex(indices)
+    const mat = new THREE.MeshBasicMaterial({ map: dirtTex, vertexColors: true, side: THREE.DoubleSide })
+    patchMaterial(mat)
+    const mesh = new THREE.Mesh(geo, mat)
+    mesh.frustumCulled = false
+    this.group.add(mesh)
+  }
+
+  private async buildProps(): Promise<void> {
+    const P = this.map.props
+    const jobs: Promise<void>[] = []
+
+    // houses: 5 models × 3 texture variants
+    jobs.push((async () => {
+      const houses = P.filter((p) => p.kind === 'house')
+      if (!houses.length) return
+      const models: LoadedModel[] = []
+      for (let h = 1; h <= 5; h++) {
+        for (let t = 1; t <= 3; t++) {
+          const tex = await loadTexture(`/assets/houses/tex/house${h}_tex${t}.png`)
+          models.push(await loadGLB(`/assets/houses/house${h}.glb`, tex))
+        }
+      }
+      for (const p of houses) this.placeClones(models[p.variant % models.length], [p])
+    })())
+
+    // hedges: one FBX segment stretched to a tile-long wall
+    jobs.push((async () => {
+      const hedges = P.filter((p) => p.kind === 'hedge')
+      if (!hedges.length) return
+      const tex = await loadTexture('/assets/hedges/tex/hedge_open_bottom_summer.png')
+      const model = await loadFBX('/assets/hedges/basic_1x1.fbx', tex)
+      this.placeClones(model, hedges, { targetSize: { x: 2.0, y: 2.2, z: TILE + 0.5 } })
+    })())
+
+    // big trees: instanced pines (embedded texture GLB)
+    jobs.push((async () => {
+      const trees = P.filter((p) => p.kind === 'tree_big')
+      if (!trees.length) return
+      const model = await loadGLB('/assets/nature/trees/pine_tree.glb', undefined, true)
+      const part = model.meshes[0]
+      const bbox = new THREE.Box3().setFromObject(model.object)
+      const size = bbox.getSize(new THREE.Vector3())
+      const center = bbox.getCenter(new THREE.Vector3())
+      const pre = new THREE.Matrix4().makeTranslation(-center.x, -bbox.min.y, -center.z)
+      const s = 9.5 / size.y // big trees ~9.5 m
+      const inst = new THREE.InstancedMesh(part.geometry, part.material, trees.length)
+      const m = new THREE.Matrix4()
+      const q = new THREE.Quaternion()
+      const up = new THREE.Vector3(0, 1, 0)
+      trees.forEach((p, i) => {
+        const s2 = s * (0.85 + ((p.variant * 37) % 10) / 30)
+        q.setFromAxisAngle(up, p.rot)
+        m.compose(new THREE.Vector3(p.x, this.map.heightAt(p.x, p.z), p.z), q, new THREE.Vector3(s2, s2, s2))
+        m.multiply(pre)
+        m.multiply(part.matrix)
+        inst.setMatrixAt(i, m)
+      })
+      inst.instanceMatrix.needsUpdate = true
+      inst.frustumCulled = false
+      this.group.add(inst)
+    })())
+
+    // small trees + bushes: tree_pack FBX + retro_nature_pack GLB variety
+    jobs.push((async () => {
+      const small = P.filter((p) => p.kind === 'tree_small')
+      const bushes = P.filter((p) => p.kind === 'bush')
+      const treeModels: LoadedModel[] = []
+      for (const v of [1, 2, 3, 4, 5, 7, 9, 11]) {
+        const num = String(v).padStart(2, '0')
+        const tex = await loadTexture(`/assets/trees/tex/tree${num}.png`)
+        treeModels.push(await loadFBX(`/assets/trees/tree${num}.fbx`, tex, true))
+      }
+      // retro_nature_pack GLBs ship geometry only — textures are separate per-season files
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8]) {
+        const num = String(v).padStart(2, '0')
+        try {
+          const tex = await loadTexture(`/assets/nature2/tex/trees/tree${num}_summer.png`)
+          treeModels.push(await loadGLB(`/assets/nature2/trees/tree${num}.glb`, tex, true))
+        } catch { /* variant may not exist */ }
+      }
+      for (let i = 0; i < treeModels.length; i++) {
+        this.placeInstanced(treeModels[i], small.filter((p) => p.variant % treeModels.length === i), { targetHeight: 5.5 })
+      }
+      const bushModels: LoadedModel[] = []
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8]) {
+        const num = String(v).padStart(2, '0')
+        try {
+          const tex = await loadTexture(`/assets/trees/tex/bush${num}.png`)
+          bushModels.push(await loadFBX(`/assets/trees/bush${num}.fbx`, tex, true))
+        } catch { /* variant may not exist */ }
+      }
+      for (const v of [1, 2, 3, 4, 5]) {
+        const num = String(v).padStart(2, '0')
+        try {
+          const tex = await loadTexture(`/assets/nature2/tex/bushes/bush${v}_summer.png`)
+          bushModels.push(await loadGLB(`/assets/nature2/bushes/bush${num}.glb`, tex, true))
+        } catch { /* variant may not exist */ }
+      }
+      for (let i = 0; i < bushModels.length; i++) {
+        this.placeInstanced(bushModels[i], bushes.filter((p) => p.variant % bushModels.length === i), { targetHeight: 1.1 })
+      }
+    })())
+
+    // rocks
+    jobs.push((async () => {
+      const rocks = P.filter((p) => p.kind === 'rock')
+      if (!rocks.length) return
+      const model = await loadGLB('/assets/nature/rocks/rock.glb')
+      const model2 = await loadGLB('/assets/nature/rocks/rock_grassy.glb')
+      this.placeInstanced(model, rocks.filter((r) => r.variant === 0), { targetWidth: 2.2 })
+      this.placeInstanced(model2, rocks.filter((r) => r.variant === 1), { targetWidth: 2.2 })
+    })())
+
+    // the tower landmark (church/water-tower silhouette, one lit window via sprite later)
+    jobs.push((async () => {
+      const towers = P.filter((p) => p.kind === 'tower')
+      if (!towers.length) return
+      try {
+        const tex = await loadTexture('/assets/landmarks/tex/textures.png')
+        const model = await loadFBX('/assets/landmarks/tower.fbx', tex)
+        this.placeClones(model, towers, { targetHeight: 16, tintAmbient: 0.8 })
+      } catch (e) {
+        console.warn('tower load failed', e)
+      }
+    })())
+
+    await Promise.all(jobs)
+  }
+}
