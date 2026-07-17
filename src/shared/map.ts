@@ -354,6 +354,12 @@ export function parseMap(): ParsedMap {
   }
   // every lamp faces its arm (local +Z) at the road centerline — consistent and always onto the road
   const lampRotToward = (lx: number, lz: number, tx: number, tz: number): number => Math.atan2(tx - lx, tz - lz)
+  // the visual head hangs ~1.15 m out along the arm — the LIGHT lives there, not at the pole tip
+  const LAMP_ARM = 1.15
+  const lampHead = (lx: number, lz: number, tx: number, tz: number): { hx: number; hz: number; rot: number } => {
+    const rot = lampRotToward(lx, lz, tx, tz)
+    return { hx: lx + Math.sin(rot) * LAMP_ARM, hz: lz + Math.cos(rot) * LAMP_ARM, rot }
+  }
 
   let lampAlt = 0
   for (const t of tiles) {
@@ -366,8 +372,9 @@ export function parseMap(): ParsedMap {
         const side = lampAlt++ % 2 === 0 ? 1 : -1
         const lx = along === 'ns' ? t.x + side * (CURB_HALF - 0.8) : t.x
         const lz = along === 'ns' ? t.z : t.z + side * (CURB_HALF - 0.8)
-        lamps.push({ x: lx, z: lz, color: SODIUM, radius: 13, intensity: 1.0, height: 5.2 })
-        props.push({ kind: 'lampProp', x: lx, z: lz, rot: lampRotToward(lx, lz, t.x, t.z), variant: 0 })
+        const head = lampHead(lx, lz, t.x, t.z)
+        lamps.push({ x: head.hx, z: head.hz, color: SODIUM, radius: 13, intensity: 1.0, height: 5.2 })
+        props.push({ kind: 'lampProp', x: lx, z: lz, rot: head.rot, variant: 0 })
       }
       // houses on open sides of straights
       if (t.piece === 'straight') {
@@ -424,8 +431,9 @@ export function parseMap(): ParsedMap {
       if ((t.gx + t.gz) % 3 === 0) {
         const lx = t.x + (along === 'ns' ? 8.6 : 0)
         const lz = t.z + (along === 'ns' ? 0 : 8.6)
-        lamps.push({ x: lx, z: lz, color: COOLWHITE, radius: 15, intensity: 0.9, height: 6.0 })
-        props.push({ kind: 'lampProp', x: lx, z: lz, rot: lampRotToward(lx, lz, t.x, t.z), variant: 1 })
+        const head = lampHead(lx, lz, t.x, t.z)
+        lamps.push({ x: head.hx, z: head.hz, color: COOLWHITE, radius: 15, intensity: 0.9, height: 6.0 })
+        props.push({ kind: 'lampProp', x: lx, z: lz, rot: head.rot, variant: 1 })
       }
     }
 
@@ -462,8 +470,12 @@ export function parseMap(): ParsedMap {
   const forestTiles = tiles.filter((t) => t.zone === 'w' && t.piece === 'straight')
   if (forestTiles.length) {
     const mid = forestTiles[Math.floor(forestTiles.length / 2)]
-    lamps.push({ x: mid.x + CURB_HALF - 0.8, z: mid.z, color: SODIUM, radius: 12, intensity: 1.1, height: 5.2 })
-    props.push({ kind: 'lampProp', x: mid.x + CURB_HALF - 0.8, z: mid.z, rot: lampRotToward(mid.x + CURB_HALF - 0.8, mid.z, mid.x, mid.z), variant: 0 })
+    {
+      const lx = mid.x + CURB_HALF - 0.8
+      const head = lampHead(lx, mid.z, mid.x, mid.z)
+      lamps.push({ x: head.hx, z: head.hz, color: SODIUM, radius: 12, intensity: 1.1, height: 5.2 })
+      props.push({ kind: 'lampProp', x: lx, z: mid.z, rot: head.rot, variant: 0 })
+    }
   }
 
   // landmark: the tower (church/water tower stand-in) just outside the village's NE corner
