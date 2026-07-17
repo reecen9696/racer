@@ -31,8 +31,10 @@ export const TUNING = {
   driveTraction: 1.25, // rear longitudinal friction budget (× load × surface) — exceeding it = wheelspin
   brakeBias: 0.65, // front share of brake force (friction circle)
 
-  handbrakeGrip: 0.32, // rear grip multiplier while handbrake held
+  handbrakeGrip: 0.22, // rear grip multiplier while handbrake held
   handbrakeDriveCut: 1.0, // 1 = fully cuts drive
+  handbrakeKick: 2.0, // rad/s² yaw kick toward the steered direction while handbrake held at speed — space = instant drift
+  driftRecoverDamping: 2.2, // extra yaw damping while the car is straightening — no pendulum snapback
 
   dragCoeff: 0.62, // quadratic air drag
   rollingResist: 5.5, // linear — coasting carries momentum like the old games
@@ -42,7 +44,7 @@ export const TUNING = {
   steerMaxHigh: 0.28, // rad max steer at maxSpeed — front can actually reach peak slip at speed
   steerAttack: 4.2, // full-locks per second toward target — quick corrections, still flickable
   steerRelease: 6.0, // return-to-center rate
-  assistGain: 0.5, // counter-steer assist strength (0..1); assist recenters steering around drift equilibrium
+  assistGain: 0.65, // counter-steer assist strength (0..1); assist recenters steering around drift equilibrium
   assistMax: 0.5, // rad
   throttleAttack: 3.2, // keyboard throttle ramp 0→1 per second
   throttleRelease: 6.0,

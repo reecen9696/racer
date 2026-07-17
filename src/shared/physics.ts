@@ -198,8 +198,19 @@ export function stepCar(
     s.yawRate = s.yawRate * (1 - kin) + kinYawRate * kin
     vLat *= 1 - kin * clamp(dt * 20, 0, 1)
   }
+  // handbrake at speed kicks the tail toward the steered direction — space reliably starts the drift
+  if (input.handbrake && Math.abs(vLong) > 6) {
+    s.yawRate += input.steer * T.handbrakeKick * Math.min(1, Math.abs(vLong) / 15) * dt * Math.sign(vLong)
+  }
+
   // yaw damping — kept low so a pendulum flick's yaw momentum carries into the drift
   s.yawRate *= 1 - clamp(dt * T.yawDamping, 0, 1)
+  // extra damping while straightening: the drift releases cleanly instead of
+  // pendulum-snapping into an opposite slide
+  const newSlip = Math.atan2(vLat, Math.max(Math.abs(vLong), 0.5))
+  if (Math.abs(newSlip) < Math.abs(s.slipAngle) && Math.abs(s.slipAngle) > 0.08) {
+    s.yawRate *= 1 - clamp(dt * T.driftRecoverDamping, 0, 1)
+  }
 
   // --- back to world ---
   s.yaw += s.yawRate * dt
