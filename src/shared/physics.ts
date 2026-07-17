@@ -157,7 +157,9 @@ export function stepCar(
   s.wheelspin = clamp(driveDemand / rearCap - 1, 0, 1)
   if (driveDemand > rearCap) driveForce = Math.sign(driveForce) * rearCap
 
-  const drag = -T.dragCoeff * vLong * Math.abs(vLong) - T.rollingResist * vLong * ((front.drag + rear.drag) / 2)
+  // sliding tires scrub speed: extra drag scaling with how sideways the car is
+  const driftDrag = -vLong * T.driftScrub * clamp(Math.abs(s.slipAngle) / 0.4, 0, 1)
+  const drag = -T.dragCoeff * vLong * Math.abs(vLong) - T.rollingResist * vLong * ((front.drag + rear.drag) / 2) + driftDrag
   // slope: gravity component along the heading (uphill slows, downhill accelerates)
   let slopeForce = 0
   if (heightAt) {

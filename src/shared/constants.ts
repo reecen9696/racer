@@ -34,7 +34,8 @@ export const TUNING = {
   handbrakeGrip: 0.22, // rear grip multiplier while handbrake held
   handbrakeDriveCut: 1.0, // 1 = fully cuts drive
   handbrakeKick: 2.0, // rad/s² yaw kick toward the steered direction while handbrake held at speed — space = instant drift
-  driftRecoverDamping: 2.2, // extra yaw damping while the car is straightening — no pendulum snapback
+  driftRecoverDamping: 3.6, // extra yaw damping while the car is straightening — snaps out of the drift cleanly
+  driftScrub: 170, // N·s/m of extra longitudinal drag at full sideways slide — drifting bleeds speed
 
   dragCoeff: 0.62, // quadratic air drag
   rollingResist: 5.5, // linear — coasting carries momentum like the old games
