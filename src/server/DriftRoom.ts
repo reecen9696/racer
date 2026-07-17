@@ -56,7 +56,14 @@ interface Sim {
   score: DriftScore
   queue: InputFrame[]
   lastInput: InputFrame
+  lastSeen: number // ms — last input packet; drives the stale-client sweep
 }
+
+// A cleanly closed tab fires onLeave via the socket close. A killed browser, a slept
+// laptop, or a dropped network can leave a half-open socket whose close never arrives,
+// stranding a ghost car on the road (and the cop will happily pull one over). Sweep
+// anyone who has stopped talking to us.
+const STALE_MS = 20000
 
 const COP_MODE_CODE: Record<CopBrain['mode'], number> = { patrol: 0, pursuit: 1, interrogate: 2, cooldown: 3 }
 
@@ -102,6 +109,7 @@ export class DriftRoom extends Room<DriftState> {
         })
       }
       if (sim.queue.length > 120) sim.queue.splice(0, sim.queue.length - 120)
+      sim.lastSeen = Date.now()
     })
 
     this.onMessage('horn', (client) => {
@@ -137,23 +145,42 @@ export class DriftRoom extends Room<DriftState> {
       score: makeScore(),
       queue: [],
       lastInput: { seq: 0, steer: 0, throttle: 0, brake: 0, handbrake: false, headlights: true },
+      lastSeen: Date.now(),
     })
   }
 
+  // closing the tab is not a legal defense — dropPlayer books an in-progress stop
   onLeave(client: Client): void {
-    // closing the tab is not a legal defense
-    if (client.sessionId === this.frozenId && this.interrogation) this.resolveInterrogation('arrest')
-    if (this.copBrain.targetId === client.sessionId) {
+    this.dropPlayer(client.sessionId)
+  }
+
+  // drop ghosts left by half-open sockets (killed browser, slept laptop, dead wifi)
+  private sweepStale(): void {
+    const now = Date.now()
+    for (const [id, sim] of this.sims) {
+      if (now - sim.lastSeen < STALE_MS) continue
+      console.log(`[room] dropping stale client ${id} (${((now - sim.lastSeen) / 1000).toFixed(0)}s silent)`)
+      const client = this.clients.find((cl) => cl.sessionId === id)
+      this.dropPlayer(id)
+      client?.leave(1001) // going away
+    }
+  }
+
+  // single teardown path for both onLeave and the stale sweep
+  private dropPlayer(id: string): void {
+    if (id === this.frozenId && this.interrogation) this.resolveInterrogation('arrest')
+    if (this.copBrain.targetId === id) {
       this.copBrain.targetId = ''
       this.copBrain.mode = 'cooldown'
       this.copBrain.cooldownT = 3
       this.copBrain.pinT = 0
     }
-    this.state.players.delete(client.sessionId)
-    this.sims.delete(client.sessionId)
+    this.state.players.delete(id)
+    this.sims.delete(id)
   }
 
   private tick(): void {
+    if (this.copBrain.tick % 60 === 0) this.sweepStale()
     for (const [, sim] of this.sims) {
       const input = sim.queue.length ? sim.queue.shift()! : sim.lastInput
       sim.lastInput = input
