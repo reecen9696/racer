@@ -319,7 +319,7 @@ export class GameAudio {
         src.loop = true
         const g = this.ctx.createGain()
         g.gain.setValueAtTime(0.0001, t)
-        g.gain.exponentialRampToValueAtTime(0.95, t + 1.2)
+        g.gain.exponentialRampToValueAtTime(1.7, t + 1.2)
         src.connect(g)
         g.connect(this.master)
         src.start(t)

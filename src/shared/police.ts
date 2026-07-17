@@ -31,10 +31,12 @@ export interface CopBrain {
   hitWhileParked: boolean
 }
 
-export const PIN_TIME = 4 // s pinned before interrogation
-export const PIN_DIST = 4.5 // m
-export const COP_STOP_V = 2 // m/s
-export const TARGET_STOP_V = 2.5
+export const PIN_TIME = 5 // s pinned before interrogation
+export const PIN_DIST = 6.0 // m — he's holding you, not touching bumpers
+export const COP_STOP_V = 3 // m/s
+export const TARGET_STOP_V = 3.5 // ≈12 km/h — a slow roll still counts as pulled over
+export const PIN_DECAY = 0.6 // pinT bleed-off per second when the hold breaks (was 2/s,
+// which wiped several seconds of progress on any wobble and demanded a dead stop)
 export const AGGRO_IMPULSE = 3.5 // m/s impact speed from collideCarPair to trigger pursuit
 export const DISENGAGE_DIST = 150
 export const DISENGAGE_TIME = 10
@@ -292,7 +294,7 @@ export function stepCopBrain(
       input.throttle = 0.12
       input.steer = steerToward(cop, target.x, target.z, 1.5)
     } else {
-      brain.pinT = Math.max(0, brain.pinT - 2 * dt)
+      brain.pinT = Math.max(0, brain.pinT - PIN_DECAY * dt)
     }
     return { input, pinnedNow }
   }
