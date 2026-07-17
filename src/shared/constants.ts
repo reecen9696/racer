@@ -19,11 +19,11 @@ export const TUNING = {
 
   engineForce: 8200, // N at full throttle (pre gear scaling) — deliberately more than the rear tires can put down in low gears
   brakeForce: 8600, // N
-  reverseForce: 4200, // N
+  reverseForce: 7000, // N — brisk reverse, no crawl
   maxSpeed: 52, // m/s soft cap (~187 km/h)
 
-  gripFront: 1.3, // peak lateral μ per axle (force = μ × load) — real-tire scale, saturates in fast corners
-  gripRear: 1.18,
+  gripFront: 1.38, // peak lateral μ per axle (force = μ × load) — real-tire scale, saturates in fast corners
+  gripRear: 1.3,
   peakSlipFront: 0.14, // rad — slip angle at grip peak (front peaks early → push/understeer past it)
   peakSlipRear: 0.17,
   gripFalloff: 0.52, // how much grip is lost far past the peak (0..1) — scaled per surface
@@ -41,8 +41,8 @@ export const TUNING = {
 
   // input shaping (client-side, pre-packet)
   steerMaxLow: 0.66, // rad max steer at standstill
-  steerMaxHigh: 0.28, // rad max steer at maxSpeed — front can actually reach peak slip at speed
-  steerAttack: 4.2, // full-locks per second toward target — quick corrections, still flickable
+  steerMaxHigh: 0.34, // rad max steer at maxSpeed — front can actually reach peak slip at speed
+  steerAttack: 5.0, // full-locks per second toward target — quick corrections, still flickable
   steerRelease: 6.0, // return-to-center rate
   assistGain: 0.65, // counter-steer assist strength (0..1); assist recenters steering around drift equilibrium
   assistMax: 0.5, // rad
