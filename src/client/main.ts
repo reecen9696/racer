@@ -18,11 +18,11 @@ import { InputShaper, RawInput } from '../shared/input'
 import { TUNING, PHYS_DT, CAR_WIDTH, CAR_LENGTH } from '../shared/constants'
 import { makeScore, stepScore } from '../shared/scoring'
 import { NetClient, RemotePlayer } from './net/net'
+import { CARS, DEFAULT_CAR } from '../shared/cars'
 import { PIN_TIME } from '../shared/police'
 
 // ---------- join screen ----------
-const COLORS = ['#4a7a3a', '#8a8f98', '#4a6fa5', '#a53a3a']
-let chosenColor = 3 // red — the most legible variant at night
+let chosenCar = DEFAULT_CAR
 let playerName = 'driver'
 
 function showJoin(): Promise<void> {
@@ -33,16 +33,16 @@ function showJoin(): Promise<void> {
     el.innerHTML = `
       <div class="spacer"></div>
       <div class="row"><span>NAME</span><input id="name" maxlength="16" placeholder="driver" /></div>
-      <div class="row"><span>CAR</span><div class="colors">${COLORS.map((c, i) => `<button data-i="${i}" style="background:${c}" class="${i === 3 ? 'sel' : ''}"></button>`).join('')}</div></div>
+      <div class="cars">${CARS.map((c, i) => `<button data-i="${i}" class="${i === DEFAULT_CAR ? 'sel' : ''}"><i style="background:${c.swatch}"></i>${c.label}</button>`).join('')}</div>
       <button id="start">DRIVE</button>
       <div class="status" id="join-status"></div>
     `
     document.body.appendChild(el)
-    el.querySelectorAll('.colors button').forEach((b) => {
+    el.querySelectorAll('.cars button').forEach((b) => {
       b.addEventListener('click', () => {
-        el.querySelectorAll('.colors button').forEach((x) => x.classList.remove('sel'))
+        el.querySelectorAll('.cars button').forEach((x) => x.classList.remove('sel'))
         b.classList.add('sel')
-        chosenColor = parseInt((b as HTMLElement).dataset.i!)
+        chosenCar = parseInt((b as HTMLElement).dataset.i!)
       })
     })
     const start = () => {
@@ -103,7 +103,7 @@ async function boot(): Promise<void> {
   }
 
   // ---------- player car ----------
-  const carModel: CarModel = await loadCar(chosenColor)
+  const carModel: CarModel = await loadCar(chosenCar)
   scene.add(carModel.group)
   const rig = new HeadlightRig(CAR_WIDTH, CAR_LENGTH)
   scene.add(rig.group)
@@ -130,7 +130,7 @@ async function boot(): Promise<void> {
   // ---------- multiplayer ----------
   const net = new NetClient(map)
   const spawnQ = new URLSearchParams(location.search).get('spawn')?.split(',').map(Number)
-  const online = await net.connect(playerName, chosenColor, spawnQ?.[0], spawnQ?.[1])
+  const online = await net.connect(playerName, chosenCar, spawnQ?.[0], spawnQ?.[1])
   console.log('[net]', online ? 'connected to room' : 'offline single-player')
   net.onHorn = (id) => {
     const r = net.remotes.get(id)
@@ -152,7 +152,7 @@ async function boot(): Promise<void> {
     pending.add(r.id) // frames keep running while the OBJ loads — don't start it twice
     try {
       const isCop = r.bot === 1
-      const model = isCop ? await loadPoliceCar() : await loadCar(r.color)
+      const model = isCop ? await loadPoliceCar() : await loadCar(r.car)
       const rig = new HeadlightRig(CAR_WIDTH, CAR_LENGTH)
       scene.add(model.group)
       scene.add(rig.group)

@@ -17,7 +17,7 @@ export interface RemoteSnapshot {
 export interface RemotePlayer {
   id: string
   name: string
-  color: number
+  car: number
   snapshots: RemoteSnapshot[]
   brake: boolean
   handbrake: boolean
@@ -67,16 +67,16 @@ export class NetClient {
   private map: ParsedMap
   private scratch = makeCarState()
   private lastName = ''
-  private lastColor = 0
+  private lastCar = 0
   private reconnectTimer = 0
 
   constructor(map: ParsedMap) {
     this.map = map
   }
 
-  async connect(name: string, color: number, sx?: number, sz?: number): Promise<boolean> {
+  async connect(name: string, car: number, sx?: number, sz?: number): Promise<boolean> {
     this.lastName = name
-    this.lastColor = color
+    this.lastCar = car
     try {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws'
       // dev (vite on 5173/5174): standalone colyseus on :2567.
@@ -84,7 +84,7 @@ export class NetClient {
       const isViteDev = location.port === '5173' || location.port === '5174'
       const endpoint = isViteDev ? `${proto}://${location.hostname || 'localhost'}:2567` : `${proto}://${location.host}`
       const client = new Client(endpoint)
-      this.room = await client.joinOrCreate('drift', { name, color, sx, sz })
+      this.room = await client.joinOrCreate('drift', { name, car, sx, sz })
       this.myId = this.room.sessionId
       this.connected = true
 
@@ -115,7 +115,7 @@ export class NetClient {
     this.reconnectTimer = window.setTimeout(async () => {
       this.reconnectTimer = 0
       const at = this.getSpawn?.()
-      const ok = await this.connect(this.lastName, this.lastColor, at?.x, at?.z)
+      const ok = await this.connect(this.lastName, this.lastCar, at?.x, at?.z)
       if (!ok) this.scheduleReconnect()
     }, 2000)
   }
@@ -188,13 +188,13 @@ export class NetClient {
     const players = this.room.state?.players
     if (!players?.forEach) return
     const seen = new Set<string>()
-    players.forEach((p: Record<string, never> & { x: number; z: number; yaw: number; speed: number; slip: number; brake: boolean; handbrake: boolean; headlights: boolean; drifting: boolean; score: number; rpm: number; color: number; name: string; bot: number; copMode: number; pinT: number; copTarget: string }, id: string) => {
+    players.forEach((p: Record<string, never> & { x: number; z: number; yaw: number; speed: number; slip: number; brake: boolean; handbrake: boolean; headlights: boolean; drifting: boolean; score: number; rpm: number; car: number; name: string; bot: number; copMode: number; pinT: number; copTarget: string }, id: string) => {
       seen.add(id)
       if (id === this.myId) return
       let r = this.remotes.get(id)
       if (!r) {
         r = {
-          id, name: p.name, color: p.color, snapshots: [],
+          id, name: p.name, car: p.car ?? 0, snapshots: [],
           brake: false, handbrake: false, headlights: true, drifting: false, score: 0, rpm: 900,
           bot: p.bot ?? 0, copMode: 0, pinT: 0, copTarget: '',
           x: p.x, z: p.z, yaw: p.yaw, speed: 0, slip: 0,

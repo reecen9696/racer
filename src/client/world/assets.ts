@@ -6,6 +6,7 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 import { patchMaterial, psxTexture } from '../renderer/patch'
 import { CAR_LENGTH } from '../../shared/constants'
+import { carDef } from '../../shared/cars'
 
 const gltfLoader = new GLTFLoader()
 const objLoader = new OBJLoader()
@@ -96,8 +97,7 @@ export interface CarModel {
   length: number
 }
 
-export const CAR_COLORS = ['', '_gray', '_blue', '_red'] // Car 01 texture variants
-export const CAR_COLOR_NAMES = ['green', 'gray', 'blue', 'red']
+// playable cars live in shared/cars.ts (the server names them for the interrogation)
 
 // parked-car dressing variety: Car 02 coupe with its own texture variants
 const PARKED_VARIANTS: Array<[string, string]> = [
@@ -115,14 +115,13 @@ export async function loadPoliceCar(): Promise<CarModel> {
   return buildCar(POLICE_OBJ, POLICE_TEX)
 }
 
-export async function loadCar(colorIdx = 0, parkedVariant = -1): Promise<CarModel> {
-  const suffix = CAR_COLORS[colorIdx % CAR_COLORS.length]
-  let objUrl = '/assets/cars/car01/Car.obj'
-  let texUrl = `/assets/cars/car01/car${suffix}.png`
+export async function loadCar(carIdx = 0, parkedVariant = -1): Promise<CarModel> {
   if (parkedVariant >= 0) {
-    ;[objUrl, texUrl] = PARKED_VARIANTS[parkedVariant % PARKED_VARIANTS.length]
+    const [objUrl, texUrl] = PARKED_VARIANTS[parkedVariant % PARKED_VARIANTS.length]
+    return buildCar(objUrl, texUrl)
   }
-  return buildCar(objUrl, texUrl)
+  const def = carDef(carIdx)
+  return buildCar(def.obj, def.tex)
 }
 
 async function buildCar(objUrl: string, texUrl: string): Promise<CarModel> {

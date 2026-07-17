@@ -13,6 +13,7 @@ export interface InterrogationFacts {
   priorOffenses: number
   sessionScore: number
   playerCarColor: string
+  playerCarKind: string // 'estate', 'van', ... — what Bram sees parked in front of him
   playerName: string
   locationNow: string
   escapeAttempted: boolean
@@ -66,7 +67,7 @@ You have just stopped a driver who HIT YOUR PATROL CAR. These facts are true and
 - Impact speed: ${Math.round(f.impactSpeedKmh)} km/h${f.hitWhileParked ? ' — into your PARKED car while you were drinking coffee' : ''}
 - They then ${f.escapeAttempted ? `fled; you chased them for ${Math.round(f.chaseDurationS)} seconds, clocking them at ${Math.round(f.playerTopSpeedKmh)} km/h` : 'stopped without a chase'}
 - Prior incidents with this driver tonight: ${f.priorOffenses - 1 >= 1 ? f.priorOffenses - 1 : 'none'}
-- Their car: a ${f.playerCarColor} station wagon, visibly driven hard
+- Their car: a ${f.playerCarColor} ${f.playerCarKind}, visibly driven hard
 - Location: ${f.locationNow}. Time: around 2 AM.
 
 You are deciding whether to let them off with a warning or book them. Your current disposition toward release is ${disposition}/100 (75+ you release, 10- you arrest on the spot).

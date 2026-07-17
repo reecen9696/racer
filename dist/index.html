@@ -60,14 +60,19 @@
     #join .spacer { flex: 0 0 30vh; } /* the artwork carries the title — push the form below it */
     #join .row { display: flex; gap: 10px; align-items: center; color: #aeb3d0; font-size: 13px; }
     #join input { background: #0a0d1f; border: 1px solid #2a2f4a; color: #cfd2e8; padding: 8px 10px; font-family: var(--pix); font-size: 14px; width: 180px; }
-    #join .colors { display: flex; gap: 8px; }
-    #join .colors button { width: 34px; height: 34px; border: 2px solid #2a2f4a; cursor: pointer; }
-    #join .colors button.sel { border-color: #ffd28a; }
+    /* car picker: swatch chip + name, two rows of four */
+    #join .cars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: min(560px, 92vw); }
+    #join .cars button { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer;
+      background: rgba(6,8,18,.82); border: 1px solid #2a2f4a; color: #9aa1c4;
+      font-family: var(--pix); font-size: 11px; letter-spacing: 1px; }
+    #join .cars button i { width: 14px; height: 14px; flex: 0 0 14px; border: 1px solid rgba(0,0,0,.6); }
+    #join .cars button:hover { border-color: #5a3f82; color: #cbb8ef; }
+    #join .cars button.sel { border-color: #ffd28a; color: #ffd28a; background: rgba(53,32,79,.75); }
     #join #start { background: #35204f; color: #cbb8ef; border: 1px solid #5a3f82; padding: 12px 44px; font-family: var(--pix); font-size: 17px; letter-spacing: 4px; cursor: pointer; margin-top: 8px; }
     #join #start:hover { background: #4a2d71; color: #e6dcff; }
     #join .status { color: #62688a; font-size: 11px; height: 14px; }
   </style>
-  <script type="module" crossorigin src="/assets/index-CxzWvstZ.js"></script>
+  <script type="module" crossorigin src="/assets/index-BQ6qSzcY.js"></script>
 </head>
 <body>
   <canvas id="game"></canvas>

@@ -14,7 +14,11 @@ const copies = [
   ['3d models/cars_PSX/Car 01', 'cars/car01'],
   ['3d models/cars_PSX/Car 02', 'cars/car02'],
   ['3d models/cars_PSX/Car 06', 'cars/car06'],
-  ['3d models/cars_PSX/Car 05', 'cars/car05'], // police (Car5_Police.obj + car5_police.png)
+  ['3d models/cars_PSX/Car 03', 'cars/car03'],
+  ['3d models/cars_PSX/Car 04', 'cars/car04'],
+  ['3d models/cars_PSX/Car 05', 'cars/car05'], // civilian Car5 + police (Car5_Police.obj)
+  ['3d models/cars_PSX/Car 07', 'cars/car07'],
+  ['3d models/cars_PSX/Car 08', 'cars/car08'],
   ['3d models/cars_PSX/Wheel', 'cars/wheel'],
   ['3d models/cars_PSX/Shadow (3D)', 'cars/shadow'],
   ['3d models/cars_PSX/Sound effects', 'audio/car'],

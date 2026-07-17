@@ -6,11 +6,9 @@ import { makeCarState, stepCar, collideCarPair, CarState, InputFrame } from '../
 import { TUNING, PHYS_DT } from '../shared/constants'
 import { parseMap, ParsedMap, Zone } from '../shared/map'
 import { makeScore, stepScore, DriftScore } from '../shared/scoring'
+import { CARS, carDef } from '../shared/cars'
 import { makeCopBrain, stepCopBrain, onCopHit, copSpawn, CopBrain, PIN_TIME, ARREST_IMMUNITY } from '../shared/police'
 import { Interrogation, InterrogationFacts, CHAT_TIME_LIMIT_S } from './interrogation'
-
-// keep in sync with the client's COLORS in main.ts — do NOT import client code into the server build
-const CAR_COLOR_NAMES = ['green', 'gray', 'blue', 'red']
 
 const COP_ID = 'npc:cop'
 
@@ -36,7 +34,7 @@ export class PlayerState extends Schema {
   @type('boolean') handbrake = false
   @type('boolean') headlights = true
   @type('boolean') drifting = false
-  @type('uint8') color = 0
+  @type('uint8') car = 0 // index into shared/cars.ts CARS
   @type('uint32') score = 0
   @type('uint32') lastSeq = 0
   @type('string') name = ''
@@ -129,13 +127,13 @@ export class DriftRoom extends Room<DriftState> {
     this.setSimulationInterval(() => this.tick(), 1000 / 60)
   }
 
-  onJoin(client: Client, options: { name?: string; color?: number; sx?: number; sz?: number }): void {
+  onJoin(client: Client, options: { name?: string; car?: number; sx?: number; sz?: number }): void {
     const p = new PlayerState()
     const idx = this.sims.size // players only — the cop occupies a players slot but no sim
     p.x = typeof options?.sx === 'number' && isFinite(options.sx) ? options.sx : this.map.spawn.x + (idx % 4) * 5 - 7.5
     p.z = typeof options?.sz === 'number' && isFinite(options.sz) ? options.sz : this.map.spawn.z + Math.floor(idx / 4) * 5
     p.yaw = this.map.spawn.yaw
-    p.color = Math.max(0, Math.min(3, options?.color ?? 0))
+    p.car = Math.max(0, Math.min(CARS.length - 1, Math.floor(options?.car ?? 0)))
     p.name = String(options?.name ?? 'driver').slice(0, 16)
     this.state.players.set(client.sessionId, p)
 
@@ -313,7 +311,8 @@ export class DriftRoom extends Room<DriftState> {
       playerTopSpeedKmh: this.copBrain.targetTopSpeed * 3.6,
       priorOffenses: this.copBrain.offenses.get(targetId) ?? 1,
       sessionScore: p.score,
-      playerCarColor: CAR_COLOR_NAMES[p.color] ?? 'green',
+      playerCarColor: carDef(p.car).colour,
+      playerCarKind: carDef(p.car).label.toLowerCase(),
       playerName: p.name,
       locationNow: this.zoneNameAt(sim.car.x, sim.car.z),
       escapeAttempted: this.copBrain.chaseT > 3,

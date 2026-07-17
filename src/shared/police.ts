@@ -372,7 +372,13 @@ export function stepCopBrain(
 export function onCopHit(brain: CopBrain, playerId: string, impactSpeed: number, copSpeed: number): boolean {
   if (brain.mode === 'interrogate') return false
   if (brain.immunity.has(playerId)) return false
-  if (impactSpeed < AGGRO_IMPULSE) return false // traffic nudge: horn, no lights
+  if (impactSpeed < AGGRO_IMPULSE) return false
+  // Already chasing this driver: every bump of the PIT is not a fresh offence.
+  // Without this the cop re-aggros on his own contact several times a chase —
+  // re-firing the siren + toast, and inflating `offenses`, which feeds
+  // priorOffenses into the stop and drops Bram's opening disposition to the
+  // arrest floor before you've said a word.
+  if (brain.mode === 'pursuit' && brain.targetId === playerId) return false // traffic nudge: horn, no lights
   brain.offenses.set(playerId, (brain.offenses.get(playerId) ?? 0) + 1)
   brain.hitSpeed = impactSpeed
   brain.hitWhileParked = Math.abs(copSpeed) < 1.5
