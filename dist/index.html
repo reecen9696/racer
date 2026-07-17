@@ -47,8 +47,14 @@
     #cop-banner.release { color: #a5ffb0; }
     #cop-banner.arrest { color: #ff7a6b; background: rgba(0,0,0,.72); animation: cop-flash .5s steps(2) 1; }
     @keyframes cop-flash { 0% { background: #fff; } 100% { background: rgba(0,0,0,.72); } }
-    /* pin ring: conic fill = how long he's had you cornered */
-    #cop-pin { position: fixed; width: 54px; height: 54px; margin: -27px 0 0 -27px; border-radius: 50%; z-index: 24; display: none; pointer-events: none; }
+    /* pin bar: how long he's had you cornered. Screen-space on your own HUD —
+       it only shows when YOU are the one being pulled over. */
+    #cop-pin { position: fixed; top: 33%; left: 50%; transform: translateX(-50%); width: min(360px, 56vw);
+      z-index: 24; display: none; pointer-events: none; font-family: var(--pix); text-align: center; }
+    #cop-pin u { display: block; font-size: 11px; letter-spacing: 3px; color: #ff7a6b; text-decoration: none;
+      text-shadow: 1px 1px 0 #000; margin-bottom: 5px; }
+    #cop-pin div { height: 12px; border: 1px solid #2a2f4a; background: rgba(6,8,18,.85); padding: 1px; }
+    #cop-pin i { display: block; height: 100%; width: 0%; transition: width .08s linear; }
 
     #debug-panel { position: fixed; top: 12px; left: 12px; width: 320px; max-height: 92vh; overflow-y: auto; background: rgba(6,8,18,.92); border: 1px solid #2a2f4a; padding: 10px 12px; font-family: var(--pix); font-size: 11px; color: #aeb3d0; z-index: 20; }
     #debug-panel .dbg-title { color: #ffd28a; margin-bottom: 8px; letter-spacing: 2px; }
@@ -72,7 +78,7 @@
     #join #start:hover { background: #4a2d71; color: #e6dcff; }
     #join .status { color: #62688a; font-size: 11px; height: 14px; }
   </style>
-  <script type="module" crossorigin src="/assets/index-BQ6qSzcY.js"></script>
+  <script type="module" crossorigin src="/assets/index-B6yEANWl.js"></script>
 </head>
 <body>
   <canvas id="game"></canvas>

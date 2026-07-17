@@ -178,6 +178,8 @@ async function boot(): Promise<void> {
   const copChat = new CopChat()
   const pinRing = document.createElement('div')
   pinRing.id = 'cop-pin'
+  pinRing.innerHTML = '<u>PULLING YOU OVER</u><div><i></i></div>'
+  const pinFill = pinRing.querySelector('i') as HTMLElement
   document.body.appendChild(pinRing)
   let frozen = false // local car is the interrogation target — server is zeroing it
   net.onCopAggro = (id) => {
@@ -542,23 +544,12 @@ async function boot(): Promise<void> {
           v.bar.group.rotation.y = r.yaw
           copDist = Math.hypot(r.x - ix, r.z - iz)
           copActive = r.copMode === 1 // pursuit only — the siren goes off at the stop
-          // pin ring at the midpoint of cop and target — everyone sees the arrest land
-          if (r.pinT > 0 && r.copTarget) {
-            const t = net.remotes.get(r.copTarget)
-            const tx = r.copTarget === net.myId ? ix : t?.x
-            const tz = r.copTarget === net.myId ? iz : t?.z
-            if (tx !== undefined && tz !== undefined) {
-              const mx = (r.x + tx) / 2, mz = (r.z + tz) / 2
-              const pp = new THREE.Vector3(mx, map.heightAt(mx, mz) + 1, mz).project(camera)
-              if (pp.z < 1) {
-                const frac = Math.min(1, r.pinT / PIN_TIME) * 360
-                pinRing.style.display = 'block'
-                pinRing.style.left = ((pp.x * 0.5 + 0.5) * window.innerWidth) + 'px'
-                pinRing.style.top = ((-pp.y * 0.5 + 0.5) * window.innerHeight) + 'px'
-                pinRing.style.background = `conic-gradient(${v.bar.phase() ? '#3355ff' : '#ff2b2b'} ${frac}deg, rgba(0,0,0,0.35) ${frac}deg)`
-                ringVisible = true
-              }
-            }
+          // pin bar — your HUD, so it only shows while HE has hold of YOU
+          if (r.pinT > 0 && r.copTarget === net.myId) {
+            pinRing.style.display = 'block'
+            pinFill.style.width = Math.min(100, (r.pinT / PIN_TIME) * 100) + '%'
+            pinFill.style.background = v.bar.phase() ? '#3355ff' : '#ff2b2b'
+            ringVisible = true
           }
         }
         // name tag above the car
