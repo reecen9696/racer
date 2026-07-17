@@ -29,8 +29,7 @@ function showJoin(): Promise<void> {
     const el = document.createElement('div')
     el.id = 'join'
     el.innerHTML = `
-      <h1>NIGHT DRIFT</h1>
-      <div class="sub">A PSX MIDNIGHT TOUGE</div>
+      <div class="spacer"></div>
       <div class="row"><span>NAME</span><input id="name" maxlength="16" placeholder="driver" /></div>
       <div class="row"><span>CAR</span><div class="colors">${COLORS.map((c, i) => `<button data-i="${i}" style="background:${c}" class="${i === 3 ? 'sel' : ''}"></button>`).join('')}</div></div>
       <button id="start">DRIVE</button>

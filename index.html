@@ -33,16 +33,15 @@
     #debug-panel input[type=range] { width: 100%; accent-color: #b8743a; height: 12px; }
     #debug-panel span { text-align: right; color: #7fd4ff; }
 
-    #join { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: radial-gradient(ellipse at 50% 70%, #10142e 0%, #04050c 70%); font-family: var(--pix); z-index: 30; }
-    #join h1 { color: #ffd28a; font-size: 42px; letter-spacing: 10px; text-shadow: 0 0 24px rgba(255,160,60,.35), 2px 2px 0 #000; }
-    #join .sub { color: #62688a; font-size: 12px; letter-spacing: 3px; margin-top: -14px; }
+    #join { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: #05060d url('/join-bg.png') center / cover no-repeat; font-family: var(--pix); z-index: 30; }
+    #join .spacer { flex: 0 0 30vh; } /* the artwork carries the title — push the form below it */
     #join .row { display: flex; gap: 10px; align-items: center; color: #aeb3d0; font-size: 13px; }
     #join input { background: #0a0d1f; border: 1px solid #2a2f4a; color: #cfd2e8; padding: 8px 10px; font-family: var(--pix); font-size: 14px; width: 180px; }
     #join .colors { display: flex; gap: 8px; }
     #join .colors button { width: 34px; height: 34px; border: 2px solid #2a2f4a; cursor: pointer; }
     #join .colors button.sel { border-color: #ffd28a; }
-    #join #start { background: #b8743a; color: #0a0d1f; border: none; padding: 12px 44px; font-family: var(--pix); font-size: 17px; letter-spacing: 4px; cursor: pointer; margin-top: 8px; }
-    #join #start:hover { background: #ffd28a; }
+    #join #start { background: #35204f; color: #cbb8ef; border: 1px solid #5a3f82; padding: 12px 44px; font-family: var(--pix); font-size: 17px; letter-spacing: 4px; cursor: pointer; margin-top: 8px; }
+    #join #start:hover { background: #4a2d71; color: #e6dcff; }
     #join .status { color: #62688a; font-size: 11px; height: 14px; }
   </style>
 </head>
