@@ -24,7 +24,7 @@ export class HUD {
         <span id="hud-speed">0</span><span class="unit">km/h</span>
         <span id="hud-gear">1</span>
       </div>
-      <div id="hud-help">WASD/arrows drive · SPACE handbrake · L lights · C camera · R reset · H horn · \` tuning</div>
+      <div id="hud-help">WASD/arrows drive · SPACE handbrake · L lights · C camera · M radio · R reset · H horn · \` tuning</div>
     `
     document.body.appendChild(root)
     this.speedEl = document.getElementById('hud-speed')!

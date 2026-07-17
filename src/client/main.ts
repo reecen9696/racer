@@ -183,7 +183,8 @@ async function boot(): Promise<void> {
     }
     if (e.code === 'KeyL') headlights = !headlights
     if (e.code === 'KeyC') camMode = (camMode + 1) % 3
-    if (e.code === 'KeyM') camMode = camMode === 3 ? 0 : 3 // debug top-down
+    if (e.code === 'KeyM') audio.toggleRadio() // car radio on/off (static burst between)
+    if (e.code === 'KeyT') camMode = camMode === 3 ? 0 : 3 // debug top-down (was M)
     if (e.code === 'KeyP') pilot = !pilot // loop-following autopilot (demo/debug)
     if (e.code === 'KeyH') { audio.horn(); net.horn() }
     if (e.code === 'KeyR') resetCar()

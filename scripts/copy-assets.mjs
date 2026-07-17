@@ -47,6 +47,8 @@ const copies = [
   ['3d models/hedge_maze_pack/textures', 'landmarks/tex'],
   // music
   ['background sounds/background-loop.mp3', 'audio/background-loop.mp3'],
+  ['background sounds/radio/radio.mp3', 'audio/radio.mp3'],
+  ['background sounds/radio/radio-static.mp3', 'audio/radio-static.mp3'],
 ]
 
 mkdirSync(out, { recursive: true })

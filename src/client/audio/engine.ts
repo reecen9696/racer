@@ -32,6 +32,13 @@ export class GameAudio {
   private hornBuf: AudioBuffer | null = null
   private brakeBuf: AudioBuffer | null = null
   private throttleSmooth = 0
+  // car radio: static burst → radio.mp3 (replaces the old always-on music loop)
+  private radioBuf: AudioBuffer | null = null
+  private staticBuf: AudioBuffer | null = null
+  private radioSrc: AudioBufferSourceNode | null = null
+  private radioGain: GainNode | null = null
+  private radioStartedAt = 0 // ctx time the station "began broadcasting" (for resume-in-progress)
+  radioOn = true
   ready = false
 
   constructor() {
@@ -55,13 +62,15 @@ export class GameAudio {
     const ctx = this.ctx
     await ctx.resume()
 
-    // --- music: decode → looping buffer source (sample-accurate, gapless) ---
-    fetchBuffer(ctx, '/assets/audio/background-loop.mp3').then((buf) => {
-      const src = ctx.createBufferSource()
-      src.buffer = buf
-      src.loop = true
-      src.connect(this.musicBus)
-      src.start()
+    // --- car radio: static burst, then the station fades in (M toggles) ---
+    Promise.all([
+      fetchBuffer(ctx, '/assets/audio/radio.mp3'),
+      fetchBuffer(ctx, '/assets/audio/radio-static.mp3'),
+    ]).then(([radio, stat]) => {
+      this.radioBuf = radio
+      this.staticBuf = stat
+      this.radioStartedAt = ctx.currentTime
+      if (this.radioOn) this.tuneIn()
     })
 
     // --- engine loop bank: 3 bands, pitch-tracked, equal-power crossfade ---
@@ -176,6 +185,62 @@ export class GameAudio {
 
   horn(): void {
     this.playOneShot(this.hornBuf, 0.8)
+  }
+
+  // --- car radio ---
+  toggleRadio(): void {
+    this.radioOn = !this.radioOn
+    if (!this.radioBuf) return // still loading; state applies when buffers land
+    if (this.radioOn) this.tuneIn()
+    else this.tuneOut()
+  }
+
+  // burst of static through the music bus (radio tuning noise)
+  private playStatic(dur: number): void {
+    if (!this.staticBuf) return
+    const t = this.ctx.currentTime
+    const src = this.ctx.createBufferSource()
+    src.buffer = this.staticBuf
+    src.loop = true // safety if the sample is shorter than dur
+    const g = this.ctx.createGain()
+    g.gain.setValueAtTime(0.0001, t)
+    g.gain.exponentialRampToValueAtTime(1.1, t + 0.06)
+    g.gain.setValueAtTime(1.1, t + Math.max(0.07, dur - 0.15))
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+    src.connect(g)
+    g.connect(this.musicBus)
+    src.start(t)
+    src.stop(t + dur + 0.05)
+  }
+
+  private tuneIn(): void {
+    if (!this.radioBuf) return
+    const t = this.ctx.currentTime
+    this.playStatic(0.85)
+    const src = this.ctx.createBufferSource()
+    src.buffer = this.radioBuf
+    src.loop = true
+    const g = this.ctx.createGain()
+    g.gain.setValueAtTime(0.0001, t + 0.55)
+    g.gain.exponentialRampToValueAtTime(1, t + 1.0)
+    src.connect(g)
+    g.connect(this.musicBus)
+    // the station kept broadcasting while the radio was off — resume mid-song
+    const offset = Math.max(0, (t - this.radioStartedAt) % this.radioBuf.duration)
+    src.start(t + 0.55, offset)
+    this.radioSrc = src
+    this.radioGain = g
+  }
+
+  private tuneOut(): void {
+    const t = this.ctx.currentTime
+    this.playStatic(0.7)
+    if (this.radioSrc && this.radioGain) {
+      this.radioGain.gain.setTargetAtTime(0.0001, t, 0.05)
+      this.radioSrc.stop(t + 0.35)
+      this.radioSrc = null
+      this.radioGain = null
+    }
   }
 
   handbrakePull(): void {
