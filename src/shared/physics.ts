@@ -275,6 +275,77 @@ export function stepCar(
   }
 }
 
+// --- car-vs-car collision: each car is two circles (front/rear) ---
+export interface CarPose { x: number; z: number; yaw: number; vx: number; vz: number }
+
+const CAR_R = 1.15 // circle radius (car ~1.9 wide)
+const CAR_AX = 1.1 // circle centers at ±this along the heading
+
+function carPoints(c: { x: number; z: number; yaw: number }): Array<{ x: number; z: number }> {
+  const fx = Math.sin(c.yaw), fz = Math.cos(c.yaw)
+  return [
+    { x: c.x + fx * CAR_AX, z: c.z + fz * CAR_AX },
+    { x: c.x - fx * CAR_AX, z: c.z - fz * CAR_AX },
+  ]
+}
+
+// symmetric resolution, both cars movable (server authority). Returns impact speed.
+export function collideCarPair(a: CarState, b: CarState): number {
+  let hit = 0
+  const rr = CAR_R * 2
+  for (const pa of carPoints(a)) {
+    for (const pb of carPoints(b)) {
+      const dx = pa.x - pb.x, dz = pa.z - pb.z
+      const d2 = dx * dx + dz * dz
+      if (d2 >= rr * rr || d2 < 1e-9) continue
+      const d = Math.sqrt(d2)
+      const nx = dx / d, nz = dz / d
+      const pen = rr - d
+      a.x += nx * pen * 0.5; a.z += nz * pen * 0.5
+      b.x -= nx * pen * 0.5; b.z -= nz * pen * 0.5
+      const vn = (a.vx - b.vx) * nx + (a.vz - b.vz) * nz
+      if (vn < 0) {
+        const j = -(1 + 0.35) * vn * 0.5 // equal masses: each takes half the impulse
+        a.vx += nx * j; a.vz += nz * j
+        b.vx -= nx * j; b.vz -= nz * j
+        a.yawRate *= 0.85
+        b.yawRate *= 0.85
+        hit = Math.max(hit, -vn)
+        a.wallHit = Math.max(a.wallHit, -vn * 0.6)
+        b.wallHit = Math.max(b.wallHit, -vn * 0.6)
+      }
+    }
+  }
+  return hit
+}
+
+// one-sided: push only `a` out of an (interpolated, immovable) remote car.
+// Client-side feedback so bumps feel instant; the server's symmetric pass is authority.
+export function collideCarKinematic(a: CarState, b: CarPose): number {
+  let hit = 0
+  const rr = CAR_R * 2
+  for (const pa of carPoints(a)) {
+    for (const pb of carPoints(b)) {
+      const dx = pa.x - pb.x, dz = pa.z - pb.z
+      const d2 = dx * dx + dz * dz
+      if (d2 >= rr * rr || d2 < 1e-9) continue
+      const d = Math.sqrt(d2)
+      const nx = dx / d, nz = dz / d
+      a.x += nx * (rr - d)
+      a.z += nz * (rr - d)
+      const vn = (a.vx - b.vx) * nx + (a.vz - b.vz) * nz
+      if (vn < 0) {
+        const j = -(1 + 0.3) * vn
+        a.vx += nx * j; a.vz += nz * j
+        a.yawRate *= 0.85
+        hit = Math.max(hit, -vn)
+        a.wallHit = Math.max(a.wallHit, -vn * 0.6)
+      }
+    }
+  }
+  return hit
+}
+
 // Serialization helpers for prediction rollback
 export function copyCarState(from: CarState, to: CarState): void {
   to.x = from.x; to.z = from.z; to.yaw = from.yaw

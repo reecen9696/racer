@@ -19,9 +19,12 @@
     #hud-toast.show { opacity: 1; }
     #hud-toast.good { color: #a5ffb0; }
     #hud-toast.bad { color: #ff7a6b; }
-    #hud-speed-box { position: absolute; bottom: 26px; right: 28px; font-size: 30px; }
-    #hud-speed-box .unit { font-size: 13px; margin: 0 10px 0 6px; color: #8a8ea8; }
-    #hud-gear { display: inline-block; border: 2px solid #444a66; padding: 2px 9px; font-size: 22px; color: #ffd28a; background: rgba(0,0,0,.35); }
+    #hud-gauge { position: absolute; bottom: 22px; left: 24px; width: 200px; height: 200px; }
+    #hud-players { margin-top: 12px; font-size: 12px; color: #9aa1c4; letter-spacing: 1px; }
+    #hud-players div { display: flex; justify-content: flex-end; gap: 14px; line-height: 1.9; }
+    #hud-players div span { color: #7c86ad; min-width: 56px; text-align: right; }
+    #hud-players div.me { color: #ffd28a; }
+    #hud-players div.me span { color: #ffd28a; }
     #hud-help { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); font-size: 11px; color: #62688a; letter-spacing: 1px; }
 
     #debug-panel { position: fixed; top: 12px; left: 12px; width: 320px; max-height: 92vh; overflow-y: auto; background: rgba(6,8,18,.92); border: 1px solid #2a2f4a; padding: 10px 12px; font-family: var(--pix); font-size: 11px; color: #aeb3d0; z-index: 20; }

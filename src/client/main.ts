@@ -12,7 +12,7 @@ import { HUD } from './ui/hud'
 import { DebugPanel } from './ui/debug'
 import { GameAudio } from './audio/engine'
 import { parseMap } from '../shared/map'
-import { makeCarState, stepCar, copyCarState, CarState, InputFrame } from '../shared/physics'
+import { makeCarState, stepCar, copyCarState, collideCarKinematic, CarState, InputFrame } from '../shared/physics'
 import { InputShaper, RawInput } from '../shared/input'
 import { TUNING, PHYS_DT, CAR_WIDTH, CAR_LENGTH } from '../shared/constants'
 import { makeScore, stepScore } from '../shared/scoring'
@@ -356,9 +356,23 @@ async function boot(): Promise<void> {
         headlights,
       }
       stepCar(car, shapedInput, TUNING, PHYS_DT, map.surfaceAt, map.colliders, map.heightAt)
+      // bump against other cars (instant local feedback; server pass is authority)
+      for (const r of net.remotes.values()) {
+        collideCarKinematic(car, {
+          x: r.x, z: r.z, yaw: r.yaw,
+          vx: Math.sin(r.yaw) * r.speed, vz: Math.cos(r.yaw) * r.speed,
+        })
+      }
       stepScore(score, car, PHYS_DT)
       net.sendInput(shapedInput)
       if (car.wallHit > 2.5) audio.crash(car.wallHit)
+      // player list (self + remotes), refreshed twice a second
+      if (seq % 30 === 0) {
+        hud.setPlayers([
+          { name: playerName, score: Math.floor(score.total), me: true },
+          ...[...net.remotes.values()].map((r) => ({ name: r.name, score: r.score, me: false })),
+        ])
+      }
 
       // skidmarks + smoke: drifting, or lighting up the rears (burnout / power-over)
       const sliding = Math.abs(car.slipAngle) > 0.18 && Math.abs(car.speed) > 5

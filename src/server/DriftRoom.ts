@@ -2,7 +2,7 @@
 // 20 Hz patches. The server never loads a model — the text grid is the world.
 import { Room, Client } from '@colyseus/core'
 import { Schema, MapSchema, type } from '@colyseus/schema'
-import { makeCarState, stepCar, CarState, InputFrame } from '../shared/physics'
+import { makeCarState, stepCar, collideCarPair, CarState, InputFrame } from '../shared/physics'
 import { TUNING, PHYS_DT } from '../shared/constants'
 import { parseMap, ParsedMap } from '../shared/map'
 import { makeScore, stepScore, DriftScore } from '../shared/scoring'
@@ -112,9 +112,20 @@ export class DriftRoom extends Room<DriftState> {
       }
       stepCar(sim.car, input, TUNING, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
       stepScore(sim.score, sim.car, PHYS_DT)
+    }
 
+    // car-vs-car collisions (authoritative, symmetric)
+    const cars = [...this.sims.values()]
+    for (let i = 0; i < cars.length; i++) {
+      for (let j = i + 1; j < cars.length; j++) {
+        collideCarPair(cars[i].car, cars[j].car)
+      }
+    }
+
+    for (const [id, sim] of this.sims) {
       const p = this.state.players.get(id)
       if (!p) continue
+      const input = sim.lastInput
       p.x = sim.car.x
       p.z = sim.car.z
       p.yaw = sim.car.yaw
