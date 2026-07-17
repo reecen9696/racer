@@ -22,11 +22,11 @@ export const TUNING = {
   reverseForce: 7000, // N — brisk reverse, no crawl
   maxSpeed: 52, // m/s soft cap (~187 km/h)
 
-  gripFront: 1.38, // peak lateral μ per axle (force = μ × load) — real-tire scale, saturates in fast corners
-  gripRear: 1.3,
-  peakSlipFront: 0.14, // rad — slip angle at grip peak (front peaks early → push/understeer past it)
-  peakSlipRear: 0.17,
-  gripFalloff: 0.52, // how much grip is lost far past the peak (0..1) — scaled per surface
+  gripFront: 1.5, // peak lateral μ per axle (force = μ × load) — real-tire scale, saturates in fast corners
+  gripRear: 1.45,
+  peakSlipFront: 0.16, // rad — slip angle at grip peak (front peaks early → push/understeer past it)
+  peakSlipRear: 0.20,
+  gripFalloff: 0.38, // how much grip is lost far past the peak (0..1) — scaled per surface
 
   driveTraction: 1.25, // rear longitudinal friction budget (× load × surface) — exceeding it = wheelspin
   brakeBias: 0.65, // front share of brake force (friction circle)
@@ -34,7 +34,7 @@ export const TUNING = {
   handbrakeGrip: 0.22, // rear grip multiplier while handbrake held
   handbrakeDriveCut: 1.0, // 1 = fully cuts drive
   handbrakeKick: 2.0, // rad/s² yaw kick toward the steered direction while handbrake held at speed — space = instant drift
-  driftRecoverDamping: 3.6, // extra yaw damping while the car is straightening — snaps out of the drift cleanly
+  driftRecoverDamping: 4.6, // extra yaw damping while the car is straightening — snaps out of the drift cleanly
   driftScrub: 170, // N·s/m of extra longitudinal drag at full sideways slide — drifting bleeds speed
 
   dragCoeff: 0.62, // quadratic air drag
@@ -42,7 +42,7 @@ export const TUNING = {
 
   // input shaping (client-side, pre-packet)
   steerMaxLow: 0.66, // rad max steer at standstill
-  steerMaxHigh: 0.34, // rad max steer at maxSpeed — front can actually reach peak slip at speed
+  steerMaxHigh: 0.045, // rad max steer at maxSpeed (~2.6 deg — real cars use less)
   steerAttack: 5.0, // full-locks per second toward target — quick corrections, still flickable
   steerRelease: 6.0, // return-to-center rate
   assistGain: 0.65, // counter-steer assist strength (0..1); assist recenters steering around drift equilibrium

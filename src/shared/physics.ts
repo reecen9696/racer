@@ -115,7 +115,14 @@ export function stepCar(
 
   // --- steering (input.steer is already shaped to a physical angle fraction) ---
   const speedT = clamp(Math.abs(vLong) / T.maxSpeed, 0, 1)
-  const steerMax = T.steerMaxLow + (T.steerMaxHigh - T.steerMaxLow) * speedT
+  // Cubic falloff, not linear. Linear still handed you near-parking lock at speed —
+  // 29 deg of road wheel at 90 km/h where ~2 deg is the fastest angle — so ~94% of the
+  // stick was pure understeer: the front washed out the instant you asked for a
+  // corner. That reads as "no grip" and makes the car impossible to place. Full lock
+  // now lands a few times past the grip peak (still provokable) with the racing band
+  // spread across the travel you actually use.
+  const k = 1 - speedT
+  const steerMax = T.steerMaxHigh + (T.steerMaxLow - T.steerMaxHigh) * k * k * k
   const delta = input.steer * steerMax
 
   // --- loads with pseudo longitudinal weight transfer ---
