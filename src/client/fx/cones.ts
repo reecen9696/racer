@@ -10,6 +10,8 @@ export interface ConeRef {
   x: number
   z: number
   rot: number
+  h?: number // model height (m) — measured from the GLB by world.ts
+  r?: number // base half-width (m)
 }
 
 // a car for hit purposes: one circle centre + its world velocity
@@ -22,8 +24,10 @@ export interface ConeHitter {
 
 interface Body {
   ref: ConeRef
+  h: number
+  r: number
   x: number
-  y: number
+  y: number // BASE-CENTRE pivot height; the solid's lowest point is y - liftFor(tumble)
   z: number
   vx: number
   vy: number
@@ -34,6 +38,15 @@ interface Body {
   spin: number // rad/s of tumble
   active: boolean
   resting: boolean
+}
+
+// How far the base-centre pivot must sit above the ground so no part of a cone tilted
+// by `tilt` pokes through it. Cone = base disc (radius r) at local y=0, apex at y=h;
+// tilting about a horizontal axis puts the apex at h·cos(tilt) and the base rim down at
+// -r·|sin(tilt)|, so the deepest point is the lower of those two.
+// Upright → 0, on its side → r, fully inverted → h. This is what makes the road solid.
+function liftFor(tilt: number, h: number, r: number): number {
+  return Math.max(-h * Math.cos(tilt), r * Math.abs(Math.sin(tilt)), 0)
 }
 
 const R_HIT = 1.35 // car circle centre → cone base distance that counts as contact
@@ -54,6 +67,8 @@ export class ConePhysics {
     for (const ref of cones) {
       this.bodies.push({
         ref,
+        h: ref.h ?? 0.7,
+        r: ref.r ?? 0.18,
         x: ref.x,
         y: this.heightAt(ref.x, ref.z),
         z: ref.z,
@@ -104,31 +119,36 @@ export class ConePhysics {
       if (!b.active) continue
 
       if (b.resting) {
-        // ease onto its side, then sleep
+        // ease onto its side, then sleep — y tracks the tilt so it settles ON the
+        // surface rather than sinking into it as the angle changes
         const diff = b.tumbleTarget - b.tumble
         if (Math.abs(diff) < 0.02) continue
         b.tumble += diff * Math.min(1, dt * 9)
+        b.y = this.heightAt(b.x, b.z) + liftFor(b.tumble, b.h, b.r)
         this.pose(b)
         continue
       }
 
-      // --- integrate flight/slide ---
+      // --- integrate flight/tumble ---
       b.vy += GRAV * dt
       b.x += b.vx * dt
       b.y += b.vy * dt
       b.z += b.vz * dt
+      b.tumble += b.spin * dt
+
+      // --- the road is solid: no part of the cone may pass below it ---
       const ground = this.heightAt(b.x, b.z)
-      if (b.y <= ground) {
-        b.y = ground
-        if (b.vy < 0) b.vy = Math.abs(b.vy) > 3 ? -b.vy * 0.32 : 0 // bounce, then stay down
+      const floor = ground + liftFor(b.tumble, b.h, b.r)
+      if (b.y <= floor) {
+        b.y = floor
+        if (b.vy < 0) b.vy = Math.abs(b.vy) > 2.2 ? -b.vy * 0.34 : 0 // bounce, then settle
         const f = Math.max(0, 1 - dt * 3.4) // scrubbing along the ground
         b.vx *= f
         b.vz *= f
-        b.spin *= Math.max(0, 1 - dt * 2.0)
+        b.spin *= Math.max(0, 1 - dt * 2.6) // tumbling rubs out against the surface
       }
-      b.tumble += b.spin * dt
 
-      if (b.y <= ground + 1e-3 && b.vy === 0 && b.vx * b.vx + b.vz * b.vz < 0.04) {
+      if (b.y <= floor + 1e-3 && b.vy === 0 && b.vx * b.vx + b.vz * b.vz < 0.04 && Math.abs(b.spin) < 0.6) {
         // came to rest: finish on its side at the nearest lying-down angle
         b.vx = 0
         b.vz = 0
@@ -149,10 +169,9 @@ export class ConePhysics {
   }
 
   private pose(b: Body): void {
-    // pivot is the cone base — lift a touch as it tips so it lies ON the ground
-    // instead of rotating half its body through it
-    const lift = 0.16 * Math.abs(Math.sin(b.tumble))
-    b.ref.wrapper.position.set(b.x, b.y + lift, b.z)
+    // b.y already carries the exact clearance for this tilt (see liftFor) — the sim
+    // and the visual agree, so nothing ever renders inside the road
+    b.ref.wrapper.position.set(b.x, b.y, b.z)
     this.qy.setFromAxisAngle(this.up, b.ref.rot)
     this.q.setFromAxisAngle(b.tumbleAxis, b.tumble)
     b.ref.wrapper.quaternion.multiplyQuaternions(this.q, this.qy)

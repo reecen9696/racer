@@ -6,6 +6,10 @@
 // so the server never loads a model.
 import { TILE } from './constants'
 import { AABB, SurfaceSampler } from './physics'
+import {
+  TACOS_BOUNDS, TACOS_NS_BANDS, TACOS_EW_BANDS, TACOS_ROAD_X, TACOS_ROAD_Z,
+  TACOS_LAMPS, TACOS_COLLIDERS,
+} from './tacosTown.generated'
 
 export const MAP_TEXT = `
 ........................
@@ -13,7 +17,7 @@ export const MAP_TEXT = `
 ...vvvvvvvvv............
 ...v.......vhhhhhh......
 ...v.......v.....hhhh...
-...v.......eeee.....h...
+...v.......eeee.....hhh.
 ...v..........ehhhhhh...
 ...w..........e.........
 ...w..........eeeee.....
@@ -134,6 +138,32 @@ const CURB_HALF = 7.4 // walkway outer edge (GLB walkway spans to 7.79)
 const SODIUM: [number, number, number] = [1.0, 0.64, 0.28]
 const COOLWHITE: [number, number, number] = [0.75, 0.85, 1.0]
 
+// --- Tacos town set piece: a full Mexican street-grid diorama parked east of the
+// highway, entered via the 2-tile stub off the circuit at (20,5). The FBX renders
+// client-side only; physics (surface + colliders) and lamps come from the
+// generated LOCAL-space data translated by this anchor, so the server never
+// loads the model. Anchor: stub east edge meets the town's main-street entry
+// (local x=-82), stub centreline meets the street's centre (local z=-8.7).
+export const TACOS_TOWN = {
+  x: 22.5 * TILE + 82.0,
+  z: 5 * TILE + 8.7,
+  y: 0.06, // sink so the town's road surface (local y≈-0.04) sits just above terrain
+}
+
+const inTacosTown = (x: number, z: number, pad = 0): boolean =>
+  x >= TACOS_TOWN.x + TACOS_BOUNDS.minX - pad && x <= TACOS_TOWN.x + TACOS_BOUNDS.maxX + pad &&
+  z >= TACOS_TOWN.z + TACOS_BOUNDS.minZ - pad && z <= TACOS_TOWN.z + TACOS_BOUNDS.maxZ + pad
+
+// street grid: asphalt inside the measured corridors, concrete elsewhere in town
+const tacosSurface = (x: number, z: number): 'asphalt' | 'curb' | null => {
+  if (!inTacosTown(x, z)) return null
+  const lx = x - TACOS_TOWN.x
+  const lz = z - TACOS_TOWN.z
+  const ns = TACOS_NS_BANDS.some(([a, b]) => lx >= a && lx <= b) && lz >= TACOS_ROAD_Z[0] && lz <= TACOS_ROAD_Z[1]
+  const ew = TACOS_EW_BANDS.some(([a, b]) => lz >= a && lz <= b) && lx >= TACOS_ROAD_X[0] && lx <= TACOS_ROAD_X[1]
+  return ns || ew ? 'asphalt' : 'curb'
+}
+
 export function parseMap(): ParsedMap {
   const grid = MAP_TEXT.split('\n')
   const H = grid.length
@@ -191,6 +221,17 @@ export function parseMap(): ParsedMap {
     }
   }
 
+  // the town stub's last tile continues into the Tacos main street instead of
+  // dead-ending: render it as a straight and extend its asphalt to the east edge
+  {
+    const stubEnd = tileMap.get('22,5')
+    if (stubEnd) {
+      stubEnd.piece = 'straight'
+      stubEnd.rot = Math.PI / 2
+      stubEnd.dirs.e = true
+    }
+  }
+
   // validate: no dangling ends (a drawn loop should be closed)
   for (const t of tiles) {
     if (t.piece === 'end') console.warn(`map: dangling road at ${t.gx},${t.gz}`)
@@ -201,7 +242,7 @@ export function parseMap(): ParsedMap {
     const gx = Math.round(x / TILE)
     const gz = Math.round(z / TILE)
     const tile = tileMap.get(gx + ',' + gz)
-    if (!tile) return 'offroad'
+    if (!tile) return tacosSurface(x, z) ?? 'offroad'
     // local coords within tile
     const lx = x - tile.x
     const lz = z - tile.z
@@ -363,12 +404,16 @@ export function parseMap(): ParsedMap {
     minX: x - hw, maxX: x + hw, minZ: z - hd, maxZ: z + hd, soft,
   })
 
-  const clearOfRoad = (x: number, z: number): boolean => {
-    for (const [ox, oz] of [[0, 0], [3, 0], [-3, 0], [0, 3], [0, -3]] as const) {
+  // 5-point clearance probe: nothing may sit within `m` metres of any road surface.
+  // 3 m is the default everywhere; the dirt corridor tightens it so the treeline can
+  // actually crowd the track instead of standing a car-width back from it.
+  const clearOfRoadBy = (x: number, z: number, m: number): boolean => {
+    for (const [ox, oz] of [[0, 0], [m, 0], [-m, 0], [0, m], [0, -m]] as const) {
       if (surfaceAt(x + ox, z + oz) !== 'offroad') return false
     }
     return true
   }
+  const clearOfRoad = (x: number, z: number): boolean => clearOfRoadBy(x, z, 3)
   // every lamp faces its arm (local +Z) at the road centerline — consistent and always onto the road
   const lampRotToward = (lx: number, lz: number, tx: number, tz: number): number => Math.atan2(tx - lx, tz - lz)
   // the visual head hangs ~1.15 m out along the arm — the LIGHT lives there, not at the pole tip
@@ -621,6 +666,9 @@ export function parseMap(): ParsedMap {
         if (hash2(t.gx, t.gz, side + 40) < 0.5) {
           const bx = along === 'ns' ? t.x + side * (CURB_HALF + 3.2) : t.x + (hash2(t.gx, t.gz, 41) - 0.5) * TILE * 0.8
           const bz = along === 'ns' ? t.z + (hash2(t.gx, t.gz, 42) - 0.5) * TILE * 0.8 : t.z + side * (CURB_HALF + 3.2)
+          // this offset is measured from the TILE centre, but on a dirt tile the ribbon
+          // drifts off-centre — without a probe the bush can land on the road itself
+          if (!clearOfRoadBy(bx, bz, 1.2)) continue
           props.push({ kind: 'bush', x: bx, z: bz, rot: hash2(t.gx, t.gz, 43) * Math.PI * 2, variant: Math.floor(hash2(t.gx, t.gz, 44) * 5) })
         }
       }
@@ -689,6 +737,18 @@ export function parseMap(): ParsedMap {
     }
   }
 
+  // Tacos town: building/prop colliders + street lamps, translated by the anchor.
+  // The lamps feed the same glow-sprite + ground-pool pipeline as the village.
+  for (const c of TACOS_COLLIDERS) {
+    colliders.push({
+      minX: TACOS_TOWN.x + c.minX, maxX: TACOS_TOWN.x + c.maxX,
+      minZ: TACOS_TOWN.z + c.minZ, maxZ: TACOS_TOWN.z + c.maxZ,
+    })
+  }
+  for (const l of TACOS_LAMPS) {
+    lamps.push({ x: TACOS_TOWN.x + l.x, z: TACOS_TOWN.z + l.z, color: SODIUM, radius: 13, intensity: 1.0, height: l.h })
+  }
+
   // --- vegetation scatter: density-field driven so some areas are thick woods and
   // others open meadow; bushes-only near the dirt road (offroad play space);
   // NOTHING is allowed to overhang the road (5-point clearance around each trunk)
@@ -706,12 +766,56 @@ export function parseMap(): ParsedMap {
     // regional density: 40 m cells, squared for contrast (dense woods vs open meadow)
     const cd = hash2(Math.floor(x / 40), Math.floor(z / 40), 96)
     if (hash2(i, 97) > cd * cd * 1.9) continue
-    if (!clearOfRoad(x, z)) continue
-    const bushOnly = nearDirt(x, z)
+    if (!clearOfRoad(x, z) || inTacosTown(x, z, 8)) continue
     const r = hash2(i, 93)
-    const kind = bushOnly ? 'bush' : r < 0.2 ? 'tree_big' : r < 0.38 ? 'tree_small' : 'bush'
+    // The dirt run used to be bush-only, which left it reading as bare scrubland.
+    // It now gets trees too — leaning small (small trees have no collider, so the
+    // offroad play space stays forgiving) but with real big-tree trunks mixed in.
+    const kind = nearDirt(x, z)
+      ? r < 0.12 ? 'tree_big' : r < 0.45 ? 'tree_small' : 'bush'
+      : r < 0.2 ? 'tree_big' : r < 0.38 ? 'tree_small' : 'bush'
     props.push({ kind, x, z, rot: hash2(i, 94) * Math.PI * 2, variant: Math.floor(hash2(i, 95) * 12) })
     if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
+  }
+
+  // Dirt-corridor treeline: the global scatter is uniform-random over the whole map,
+  // so it can never guarantee density along one specific run. This walks the dirt
+  // centreline itself and plants outward from it, which is what makes the section
+  // feel like a track cut through woods rather than a strip across a field.
+  //
+  // Hard trunks (tree_big) are held back to the outer band and probed with a wider
+  // margin than the soft stuff. The dirt run is the offroad play space — the verge
+  // you clip while sliding should be small trees and bushes that cost you nothing,
+  // with the collidable trunks far enough out that hitting one is a real mistake.
+  for (const t of dirtTiles) {
+    const STEPS = 16
+    for (let s = 0; s < STEPS; s++) {
+      const u = (s + 0.5) / STEPS
+      const [px, pz] = dirtCenterlinePoint(t, u)
+      // tangent by finite difference along the centreline, then the lateral normal
+      const [ax, az] = dirtCenterlinePoint(t, Math.min(1, u + 0.02))
+      const [bx, bz] = dirtCenterlinePoint(t, Math.max(0, u - 0.02))
+      const tlen = Math.hypot(ax - bx, az - bz) || 1
+      const nx = -(az - bz) / tlen, nz = (ax - bx) / tlen
+      for (const side of [-1, 1]) {
+        for (let slot = 0; slot < 4; slot++) {
+          const salt = t.gx * 31 + t.gz * 17 + s * 7 + slot * 3 + (side > 0 ? 1000 : 0)
+          if (hash2(salt, slot, 401) > 0.72) continue // gaps, so it isn't a hedge wall
+          const r = hash2(salt, s, 402)
+          const kind = r < 0.18 ? 'tree_big' : r < 0.58 ? 'tree_small' : 'bush'
+          // big trunks live in the outer band; soft cover crowds the edge
+          const lat = kind === 'tree_big'
+            ? 11.5 + hash2(salt, slot, 403) * 9
+            : 6.4 + slot * 1.5 + hash2(salt, slot, 404) * 3.5
+          const jit = (hash2(salt, slot, 405) - 0.5) * 3.5
+          const x = px + nx * side * lat + (ax - bx) / tlen * jit
+          const z = pz + nz * side * lat + (az - bz) / tlen * jit
+          if (!clearOfRoadBy(x, z, kind === 'tree_big' ? 2.4 : 1.2)) continue
+          props.push({ kind, x, z, rot: hash2(salt, slot, 406) * Math.PI * 2, variant: Math.floor(hash2(salt, slot, 407) * 8) })
+          if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
+        }
+      }
+    }
   }
 
   // densify the NE quarter around the highway — the global density field can leave
@@ -725,7 +829,7 @@ export function parseMap(): ParsedMap {
       const x = x0 + hash2(i, 301) * (x1 - x0)
       const z = z0 + hash2(i, 302) * (z1 - z0)
       if (hash2(i, 303) > 0.5) continue
-      if (!clearOfRoad(x, z)) continue
+      if (!clearOfRoad(x, z) || inTacosTown(x, z, 8)) continue
       if ((x - 15.5 * TILE) ** 2 + (z - 4.5 * TILE) ** 2 < 9 * 9) continue // gazebo clearing
       let nearHouse = false
       for (const h of houses) {
@@ -757,6 +861,7 @@ export function parseMap(): ParsedMap {
       else { x = minX - out; z = maxZ - (along - wSide * 2 - hSide) }
       x += (hash2(i, 203) - 0.5) * 8
       z += (hash2(i, 204) - 0.5) * 8
+      if (inTacosTown(x, z, 8)) continue
       const big = hash2(i, 205) < 0.7
       props.push({ kind: big ? 'tree_big' : 'tree_small', x, z, rot: hash2(i, 206) * Math.PI * 2, variant: Math.floor(hash2(i, 207) * 12) })
       if (big && out < 14) colliders.push(box(x, z, 0.8, 0.8))
@@ -767,8 +872,18 @@ export function parseMap(): ParsedMap {
   for (let i = 0; i < 160; i++) {
     const x = hash2(i, 77) * W * TILE
     const z = hash2(i, 78) * H * TILE
-    if (!clearOfRoad(x, z)) continue
+    if (!clearOfRoad(x, z) || inTacosTown(x, z, 8)) continue
     props.push({ kind: 'rock', x, z, rot: hash2(i, 81) * Math.PI * 2, variant: i % 2 })
+  }
+
+  // Street furniture colliders, done in one blanket pass so every lamp/sign site
+  // above gets one without eight duplicated pushes. Both are thin: the car circle
+  // is r=1.0, so these half-extents only add the post's own girth on top of it.
+  // Signs are `soft` — a sheet-metal plate on a thin post gives and scrubs speed
+  // rather than stopping you dead like a concrete lamp base does.
+  for (const p of props) {
+    if (p.kind === 'lampProp') colliders.push(box(p.x, p.z, 0.15, 0.15))
+    else if (p.kind === 'sign') colliders.push(box(p.x, p.z, 0.12, 0.12, true))
   }
 
   // spawn: middle of the village main street (the top EW run), facing east
@@ -781,13 +896,18 @@ export function parseMap(): ParsedMap {
     const gx = Math.round(x / TILE)
     const gz = Math.round(z / TILE)
     const t = tileMap.get(gx + ',' + gz)
-    if (!t) return 0.6
+    if (!t) return inTacosTown(x, z, TILE) ? 0.25 : 0.6
     return t.zone === 'p' ? 1.0 : t.zone === 'w' ? 0.8 : t.zone === 'e' ? 0.4 : t.zone === 'h' ? 0.5 : 0.25
   }
 
   return {
     tiles, lamps, props, colliders, spawn, surfaceAt, heightAt, mistAt, loopOrder: order,
-    bounds: { minX: -5 * TILE, minZ: -5 * TILE, maxX: (W + 4) * TILE, maxZ: (H + 4) * TILE },
+    bounds: {
+      minX: -5 * TILE, minZ: -5 * TILE,
+      // stretch east so the terrain runs under the Tacos town set piece
+      maxX: Math.max((W + 4) * TILE, TACOS_TOWN.x + TACOS_BOUNDS.maxX + 2 * TILE),
+      maxZ: (H + 4) * TILE,
+    },
     grid,
   }
 }

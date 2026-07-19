@@ -33,6 +33,11 @@ export interface CarState {
   surfRL: SurfaceName
   surfRR: SurfaceName
   wallHit: number // impulse magnitude of most recent wall contact this step (0 if none)
+  // 0..1 post-impact destabilization: set by car-vs-car hits in proportion to closing
+  // speed, decays over ~1.5 s. While it's up the tires shed grip and the grip assist
+  // stops pulling the car back onto its nose — so a hard hit sends the victim SLIDING
+  // instead of instantly regripping and driving off. See stepCar's decay + usage.
+  hitSlide: number
 }
 
 export function makeCarState(x = 0, z = 0, yaw = 0): CarState {
@@ -42,7 +47,7 @@ export function makeCarState(x = 0, z = 0, yaw = 0): CarState {
     gear: 0, rpm: 900, shiftCut: 0,
     slipAngle: 0, slipFront: 0, slipRear: 0, wheelspin: 0, speed: 0, aLongSmooth: 0,
     surfFL: 'asphalt', surfFR: 'asphalt', surfRL: 'asphalt', surfRR: 'asphalt',
-    wallHit: 0,
+    wallHit: 0, hitSlide: 0,
   }
 }
 
@@ -99,6 +104,9 @@ export function stepCar(
   // instead of poisoning the car (and, via car-vs-car collisions, the whole room)
   // with NaN forever. See the finite guard at the end of this function.
   const gx = s.x, gz = s.z, gyaw = s.yaw
+  // impact destabilization decays back to planted over ~1.5 s
+  s.hitSlide -= s.hitSlide * clamp(dt * 1.6, 0, 1)
+  if (s.hitSlide < 1e-3) s.hitSlide = 0
   const sinY = Math.sin(s.yaw), cosY = Math.cos(s.yaw)
   // body-frame velocity: forward = (sinY, cosY) in XZ
   let vLong = s.vx * sinY + s.vz * cosY
@@ -205,7 +213,9 @@ export function stepCar(
   const frontEllipse = Math.max(Math.sqrt(1 - frontLongUse * frontLongUse), 0.35)
   // committed slides FLOAT a little: both axles shed some grip as the body goes
   // sideways — the drift glides rather than biting, and the exit re-bite is softer.
-  const floaty = 1 - T.driftGripLoss * clamp((Math.abs(bodySlip) - 0.12) / 0.35, 0, 1)
+  // A fresh impact also unloads the tires (weight thrown across the car, wheels skittering)
+  // — this is most of what makes a hard hit LOOK like a hit rather than a nudge.
+  const floaty = (1 - T.driftGripLoss * clamp((Math.abs(bodySlip) - 0.12) / 0.35, 0, 1)) * (1 - 0.5 * s.hitSlide)
   // the handbrake also relaxes the FRONT: with the rear let go, full front grip does
   // nothing but yank the car around — this is what whipped a handbrake pull straight
   // through 40° to near-perpendicular. A handbrake slide should drift, not pirouette.
@@ -251,7 +261,9 @@ export function stepCar(
   if (!input.handbrake && kin < 1) {
     const surfLat = (front.lateral + rear.lateral) / 2
     const slipNow = Math.atan2(vLat, Math.max(Math.abs(vLong), 0.5))
-    const fade = clamp(1 - Math.abs(slipNow) / T.gripAssistFadeSlip, 0, 1)
+    // ...and cut entirely right after an impact: the assist is what makes the car track
+    // its nose, so leaving it on would suck a T-boned car straight back onto its heading.
+    const fade = clamp(1 - Math.abs(slipNow) / T.gripAssistFadeSlip, 0, 1) * (1 - s.hitSlide)
     vLat *= 1 - clamp(T.gripAssist * surfLat * surfLat * fade * dt, 0, 1)
   }
   // handbrake at speed kicks the tail toward the steered direction — space reliably starts the drift
@@ -268,15 +280,17 @@ export function stepCar(
   {
     const slipNow2 = Math.atan2(vLat, Math.max(Math.abs(vLong), 0.5))
     const excess = clamp((Math.abs(slipNow2) - 0.52) / 0.4, 0, 1)
+    // relaxed right after an impact — a hit that spins you past the governor's angle
+    // should actually spin you, not be caught by the same aid that shapes a drift.
     if (excess > 0 && Math.sign(s.yawRate) === -Math.sign(slipNow2)) {
-      s.yawRate *= 1 - clamp(dt * 11 * excess, 0, 1)
+      s.yawRate *= 1 - clamp(dt * 11 * excess * (1 - 0.85 * s.hitSlide), 0, 1)
     }
   }
   // extra damping while straightening: the drift releases cleanly instead of
   // pendulum-snapping into an opposite slide
   const newSlip = Math.atan2(vLat, Math.max(Math.abs(vLong), 0.5))
   if (Math.abs(newSlip) < Math.abs(s.slipAngle) && Math.abs(s.slipAngle) > 0.08) {
-    s.yawRate *= 1 - clamp(dt * T.driftRecoverDamping, 0, 1)
+    s.yawRate *= 1 - clamp(dt * T.driftRecoverDamping * (1 - 0.85 * s.hitSlide), 0, 1)
   }
 
   // --- back to world ---
@@ -355,7 +369,7 @@ export function stepCar(
     s.yaw = Number.isFinite(gyaw) ? gyaw : 0
     s.vx = 0; s.vz = 0; s.yawRate = 0
     s.speed = 0; s.slipAngle = 0; s.slipFront = 0; s.slipRear = 0
-    s.aLongSmooth = 0; s.wheelspin = 0; s.wallHit = 0
+    s.aLongSmooth = 0; s.wheelspin = 0; s.wallHit = 0; s.hitSlide = 0
     if (!Number.isFinite(s.rpm)) s.rpm = T.idleRpm
   }
 }
@@ -374,6 +388,31 @@ function carPoints(c: { x: number; z: number; yaw: number }): Array<{ x: number;
   ]
 }
 
+// How a hit reads is mostly about three things, none of which a plain equal-and-opposite
+// push gives you: hard hits must bounce harder than soft ones (restitution rises with
+// closing speed), an off-centre hit must SPIN the car it lands on (yaw impulse from the
+// lever arm between the contact point and the car's centre), and the car that got hit
+// must lose the plot for a moment afterwards rather than instantly regripping (hitSlide,
+// consumed by stepCar). Everything below is deterministic — client prediction and server
+// authority run the identical resolution.
+const HIT_MASS = 1200 // kg, base car — collisions ignore per-car mass so the pair stays symmetric
+const HIT_INERTIA = 1450 // kg m^2, matches TUNING.inertia
+// A fully rigid solve would couple linear and angular response; this splits a fraction of
+// the impulse off into spin instead, so the number is picked by feel rather than derived.
+const HIT_SPIN = 0.12
+
+// Closing speed → restitution. A parking-speed nudge barely separates the cars (0.25);
+// a 20 m/s T-bone throws them apart (0.75). Linear between.
+function hitRestitution(closing: number): number {
+  return 0.25 + clamp(closing / 20, 0, 1) * 0.5
+}
+
+// Impact → 0..1 destabilization. Dead below ~3 m/s so traffic jostling stays planted;
+// saturated by ~16 m/s, where the victim should be fully unloaded and sliding.
+function hitSlideFor(closing: number): number {
+  return clamp((closing - 3) / 13, 0, 1)
+}
+
 // symmetric resolution, both cars movable (server authority). Returns impact speed.
 export function collideCarPair(a: CarState, b: CarState): number {
   let hit = 0
@@ -390,16 +429,28 @@ export function collideCarPair(a: CarState, b: CarState): number {
       const pen = rr - d
       a.x += nx * pen * 0.5; a.z += nz * pen * 0.5
       b.x -= nx * pen * 0.5; b.z -= nz * pen * 0.5
+      // contact point sits between the two overlapping circles
+      const cx = (pa.x + pb.x) * 0.5, cz = (pa.z + pb.z) * 0.5
       const vn = (a.vx - b.vx) * nx + (a.vz - b.vz) * nz
       if (vn < 0) {
-        const j = -(1 + 0.35) * vn * 0.5 // equal masses: each takes half the impulse
+        const closing = -vn
+        const j = -(1 + hitRestitution(closing)) * vn * 0.5 // equal masses: each takes half
         a.vx += nx * j; a.vz += nz * j
         b.vx -= nx * j; b.vz -= nz * j
-        a.yawRate *= 0.85
-        b.yawRate *= 0.85
-        hit = Math.max(hit, -vn)
-        a.wallHit = Math.max(a.wallHit, -vn * 0.6)
-        b.wallHit = Math.max(b.wallHit, -vn * 0.6)
+        // yaw from the lever arm: the impulse acts at the contact point, not at the centre
+        // of mass, so a corner-to-corner hit rotates both cars and a square rear-ender
+        // (zero lever arm) doesn't. cross(r, impulse) in the XZ plane.
+        const p = j * HIT_MASS * HIT_SPIN
+        const spinA = ((cz - a.z) * (nx * p) - (cx - a.x) * (nz * p)) / HIT_INERTIA
+        const spinB = ((cz - b.z) * (-nx * p) - (cx - b.x) * (-nz * p)) / HIT_INERTIA
+        a.yawRate = clamp(a.yawRate + spinA, -4, 4)
+        b.yawRate = clamp(b.yawRate + spinB, -4, 4)
+        const slide = hitSlideFor(closing)
+        a.hitSlide = Math.max(a.hitSlide, slide)
+        b.hitSlide = Math.max(b.hitSlide, slide)
+        hit = Math.max(hit, closing)
+        a.wallHit = Math.max(a.wallHit, closing * 0.6)
+        b.wallHit = Math.max(b.wallHit, closing * 0.6)
       }
     }
   }
@@ -420,13 +471,19 @@ export function collideCarKinematic(a: CarState, b: CarPose): number {
       const nx = dx / d, nz = dz / d
       a.x += nx * (rr - d)
       a.z += nz * (rr - d)
+      const cx = (pa.x + pb.x) * 0.5, cz = (pa.z + pb.z) * 0.5
       const vn = (a.vx - b.vx) * nx + (a.vz - b.vz) * nz
       if (vn < 0) {
-        const j = -(1 + 0.3) * vn
+        const closing = -vn
+        // `a` absorbs the whole impulse here (b is an immovable interpolated ghost), so
+        // the same restitution/spin/slide rules apply at full strength rather than halved
+        const j = -(1 + hitRestitution(closing)) * vn
         a.vx += nx * j; a.vz += nz * j
-        a.yawRate *= 0.85
-        hit = Math.max(hit, -vn)
-        a.wallHit = Math.max(a.wallHit, -vn * 0.6)
+        const p = j * HIT_MASS * HIT_SPIN * 0.5
+        a.yawRate = clamp(a.yawRate + ((cz - a.z) * (nx * p) - (cx - a.x) * (nz * p)) / HIT_INERTIA, -4, 4)
+        a.hitSlide = Math.max(a.hitSlide, hitSlideFor(closing))
+        hit = Math.max(hit, closing)
+        a.wallHit = Math.max(a.wallHit, closing * 0.6)
       }
     }
   }
@@ -443,4 +500,5 @@ export function copyCarState(from: CarState, to: CarState): void {
   to.speed = from.speed; to.aLongSmooth = from.aLongSmooth
   to.surfFL = from.surfFL; to.surfFR = from.surfFR; to.surfRL = from.surfRL; to.surfRR = from.surfRR
   to.wallHit = from.wallHit
+  to.hitSlide = from.hitSlide
 }

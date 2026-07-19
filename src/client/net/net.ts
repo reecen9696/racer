@@ -161,6 +161,9 @@ export class NetClient {
     s.slipFront = car.slipFront; s.slipRear = car.slipRear
     s.surfFL = car.surfFL; s.surfFR = car.surfFR; s.surfRL = car.surfRL; s.surfRR = car.surfRR
     s.wallHit = 0
+    // hitSlide isn't in the schema; keep the locally-predicted value (collideCarKinematic
+    // sets it at almost the same moment the server's pass does) rather than a stale scratch one
+    s.hitSlide = car.hitSlide
     for (const input of this.unacked) {
       stepCar(s, input, this.tuning, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
     }

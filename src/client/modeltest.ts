@@ -110,6 +110,9 @@ async function run(): Promise<void> {
     const loadTex = (key: string): THREE.Texture => {
       const t = texLoader.load(files[key])
       t.colorSpace = THREE.SRGBColorSpace
+      // FBX UVs tile outside [0,1] — default clamp smears edge pixels across
+      // whole walls (the "streaky brick" artefact)
+      t.wrapS = t.wrapT = THREE.RepeatWrapping
       t.name = key
       return t
     }

@@ -1,6 +1,6 @@
 // Copies the assets the game actually uses from the pack folders into public/assets.
 // public/assets is git-ignored: PSX_Roads and some packs are not CC0-redistributable.
-import { cpSync, mkdirSync, existsSync } from 'node:fs'
+import { cpSync, mkdirSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -58,6 +58,9 @@ const copies = [
   ['background sounds/cop/cop-first-message.mp3', 'audio/cop-first-message.mp3'],
   ['background sounds/cop/cop-annoyed.mp3', 'audio/cop-annoyed.mp3'],
   ['background sounds/cop/cop-happy.mp3', 'audio/cop-happy.mp3'],
+  // Tacos town set piece (FBX has no texture links — materials bind by name via manifest)
+  ['3d models/newmodels/Tacos/Tacos/Models/Tacos.fbx', 'tacos/Tacos.fbx'],
+  ['3d models/newmodels/Tacos/Tacos/Textures', 'tacos/Textures'],
 ]
 
 mkdirSync(out, { recursive: true })
@@ -69,5 +72,16 @@ for (const [src, dst] of copies) {
   }
   cpSync(from, join(out, dst), { recursive: true })
   console.log('copied', src, '->', 'public/assets/' + dst)
+}
+
+// tacos manifest: lowercase texture name → served path (prod hosting is case-sensitive)
+{
+  const texDir = join(out, 'tacos', 'Textures')
+  if (existsSync(texDir)) {
+    const manifest = {}
+    for (const f of readdirSync(texDir)) manifest[f.toLowerCase()] = '/assets/tacos/Textures/' + f
+    writeFileSync(join(out, 'tacos', 'manifest.json'), JSON.stringify(manifest))
+    console.log('wrote tacos/manifest.json', Object.keys(manifest).length, 'entries')
+  }
 }
 console.log('done')

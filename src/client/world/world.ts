@@ -5,6 +5,7 @@ import { TILE } from '../../shared/constants'
 import { ParsedMap, Lamp, Prop, RoadTile, hash2, dirtCenterlinePoint } from '../../shared/map'
 import { loadGLB, loadFBX, loadTexture, LoadedModel } from './assets'
 import { patchMaterial, psxTexture } from '../renderer/patch'
+import { buildTacosTown } from './tacos'
 
 // Night ambient: never pure black — everything silhouettes against the sky.
 const AMBIENT = new THREE.Color(0.64, 0.68, 0.86)
@@ -20,8 +21,9 @@ export interface InstancedProp {
 export class World {
   group = new THREE.Group()
   map: ParsedMap
-  // individually-placed cone wrappers, consumed by fx/cones.ts knockdown physics
-  cones: { wrapper: THREE.Group; x: number; z: number; rot: number }[] = []
+  // individually-placed cone wrappers + measured model dims, consumed by the
+  // fx/cones.ts knockdown physics (h/r keep the cone out of the road at every tilt)
+  cones: { wrapper: THREE.Group; x: number; z: number; rot: number; h: number; r: number }[] = []
   // every bush instance, consumed by fx/bushes.ts (explode on hit, regrow later)
   bushes: InstancedProp[] = []
 
@@ -52,6 +54,7 @@ export class World {
       this.buildRoads(),
       this.buildLampPosts(),
       this.buildProps(),
+      buildTacosTown(this),
     ])
   }
 
@@ -538,7 +541,12 @@ export class World {
         if (!sel.length) continue
         const model = await loadGLB(`/assets/roads/Traffic_Cone_${v + 1}.glb`)
         const wrappers = this.placeClones(model, sel, { tintAmbient: 1.2 })
-        sel.forEach((p, i) => this.cones.push({ wrapper: wrappers[i], x: p.x, z: p.z, rot: p.rot }))
+        // measure the actual model so the knockdown physics knows how far to hold the
+        // cone off the road at each tilt (guessed dimensions = clipping)
+        const size = new THREE.Box3().setFromObject(model.object).getSize(new THREE.Vector3())
+        const h = size.y
+        const r = Math.max(size.x, size.z) / 2
+        sel.forEach((p, i) => this.cones.push({ wrapper: wrappers[i], x: p.x, z: p.z, rot: p.rot, h, r }))
       }
     })())
 
