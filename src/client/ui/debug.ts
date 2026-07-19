@@ -42,6 +42,8 @@ export class DebugPanel {
       { key: 'peakSlipRear', obj: T, min: 0.05, max: 0.4, step: 0.005 },
       { key: 'gripFalloff', obj: T, min: 0, max: 0.8, step: 0.02 },
       { key: 'driveTraction', obj: T, min: 0.5, max: 3, step: 0.05 },
+      { key: 'gripAssist', obj: T, min: 0, max: 10, step: 0.1 },
+      { key: 'gripAssistFadeSlip', obj: T, min: 0.05, max: 0.8, step: 0.01 },
       { key: 'brakeBias', obj: T, min: 0.3, max: 0.9, step: 0.02 },
       { key: 'yawDamping', obj: T, min: 0, max: 3, step: 0.05 },
       { key: 'handbrakeGrip', obj: T, min: 0.05, max: 0.8, step: 0.01 },

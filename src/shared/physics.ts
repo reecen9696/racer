@@ -95,6 +95,10 @@ export function stepCar(
   colliders: AABB[],
   heightAt?: HeightSampler,
 ): void {
+  // snapshot the last known-good pose so a non-finite step can be rolled back
+  // instead of poisoning the car (and, via car-vs-car collisions, the whole room)
+  // with NaN forever. See the finite guard at the end of this function.
+  const gx = s.x, gz = s.z, gyaw = s.yaw
   const sinY = Math.sin(s.yaw), cosY = Math.cos(s.yaw)
   // body-frame velocity: forward = (sinY, cosY) in XZ
   let vLong = s.vx * sinY + s.vz * cosY
@@ -116,12 +120,11 @@ export function stepCar(
 
   // --- steering (input.steer is already shaped to a physical angle fraction) ---
   const speedT = clamp(Math.abs(vLong) / T.maxSpeed, 0, 1)
-  // Cubic falloff, not linear. Linear still handed you near-parking lock at speed —
-  // 29 deg of road wheel at 90 km/h where ~2 deg is the fastest angle — so ~94% of the
-  // stick was pure understeer: the front washed out the instant you asked for a
-  // corner. That reads as "no grip" and makes the car impossible to place. Full lock
-  // now lands a few times past the grip peak (still provokable) with the racing band
-  // spread across the travel you actually use.
+  // Quadratic falloff: linear hands you parking lock at speed (pure understeer), but the
+  // old cubic starved mid-speed steering — at half of maxSpeed only 12% of the extra lock
+  // remained, which with real-μ grip read as "the car won't turn" (boat). Quadratic keeps
+  // a usable racing band through the map's actual corner speeds; full lock still lands
+  // past the grip peak so the front stays provokable.
   const k = 1 - speedT
   // Sideways, you need REAL lock to catch it — a drifting car is counter-steered near
   // full lock, and the speed falloff above would deny exactly that, which is what makes
@@ -129,7 +132,9 @@ export function stepCar(
   // the car already is: full authority when drifting, precise mapping when racing
   // straight (where slip is small and the falloff is what stops the understeer).
   const catchBoost = 1 + clamp(Math.abs(bodySlip) / 0.35, 0, 1) * T.counterSteerBoost
-  const steerMax = (T.steerMaxHigh + (T.steerMaxLow - T.steerMaxHigh) * k * k * k) * catchBoost
+  // cap at 0.85 rad (~49°, drift-kit lock): past that cos/tan(delta) leave the model's
+  // valid range — uncapped, catchBoost could push delta beyond 70° and blow up yaw
+  const steerMax = Math.min((T.steerMaxHigh + (T.steerMaxLow - T.steerMaxHigh) * k * k) * catchBoost, 0.85)
   const delta = input.steer * steerMax
 
   // --- loads with pseudo longitudinal weight transfer ---
@@ -189,7 +194,9 @@ export function stepCar(
   // Rear under power (or rear brake share), front under its brake share — hard braking
   // into a corner plows (understeer), flooring it swings the rear (power oversteer).
   const rearLongUse = clamp((driveDemand + Math.abs(brakeForce) * (1 - T.brakeBias)) / rearCap, 0, 1)
-  const rearEllipse = Math.max(Math.sqrt(1 - rearLongUse * rearLongUse), 0.22)
+  // floor 0.45: power reduces rear grip (power-over is still a move) but never fully
+  // kills it — at 0.22 any saturated-throttle corner snapped into a spin
+  const rearEllipse = Math.max(Math.sqrt(1 - rearLongUse * rearLongUse), 0.45)
   const frontCap = Math.max(loadF * T.driveTraction * front.longitudinal, 1)
   const frontLongUse = clamp((Math.abs(brakeForce) * T.brakeBias) / frontCap, 0, 1)
   const frontEllipse = Math.max(Math.sqrt(1 - frontLongUse * frontLongUse), 0.35)
@@ -206,6 +213,9 @@ export function stepCar(
 
   const torque = fLatFront * Math.cos(delta) * a - fLatRear * b
   s.yawRate += (torque / T.inertia) * dt
+  // sanity clamp: no real slide exceeds ~230°/s — anything past this is the integrator
+  // blowing up (big slip + big lock at 60 Hz), and it reads as a teleport-spin
+  s.yawRate = clamp(s.yawRate, -4, 4)
 
   // --- low-speed kinematic blend (kills the parking-lot jitter) ---
   const kin = clamp(1 - Math.abs(vLong) / T.kinematicBlendSpeed, 0, 1)
@@ -213,6 +223,16 @@ export function stepCar(
     const kinYawRate = (vLong / L) * Math.tan(delta)
     s.yawRate = s.yawRate * (1 - kin) + kinYawRate * kin
     vLat *= 1 - kin * clamp(dt * 20, 0, 1)
+  }
+  // --- grip assist: bleed lateral velocity so the car tracks where the nose points
+  // instead of sailing on its old vector (the "boat" feel). Slip-gated — full effect in
+  // normal driving, fades to zero by gripAssistFadeSlip so a committed slide keeps its
+  // momentum — and off under handbrake. Surface grip² scaling keeps dirt/grass slidey.
+  if (!input.handbrake && kin < 1) {
+    const surfLat = (front.lateral + rear.lateral) / 2
+    const slipNow = Math.atan2(vLat, Math.max(Math.abs(vLong), 0.5))
+    const fade = clamp(1 - Math.abs(slipNow) / T.gripAssistFadeSlip, 0, 1)
+    vLat *= 1 - clamp(T.gripAssist * surfLat * surfLat * fade * dt, 0, 1)
   }
   // handbrake at speed kicks the tail toward the steered direction — space reliably starts the drift
   if (input.handbrake && Math.abs(vLong) > 6) {
@@ -289,6 +309,24 @@ export function stepCar(
       }
     }
   }
+
+  // --- finite guard (deterministic; runs identically on client prediction and
+  // server authority so they never diverge). A numeric blow-up anywhere above
+  // (e.g. a car wedged among colliders accumulating Infinity impulses, then
+  // Infinity - Infinity) would otherwise make x/z/yaw NaN permanently: every
+  // patch logs "trying to encode NaN", and collideCarPair spreads it to every
+  // nearby car. If any integrated output is non-finite, roll back to the last
+  // good pose and kill the velocity — the car freezes for one frame and recovers.
+  if (!(Number.isFinite(s.x) && Number.isFinite(s.z) && Number.isFinite(s.yaw) &&
+        Number.isFinite(s.vx) && Number.isFinite(s.vz) && Number.isFinite(s.yawRate))) {
+    s.x = Number.isFinite(gx) ? gx : 0
+    s.z = Number.isFinite(gz) ? gz : 0
+    s.yaw = Number.isFinite(gyaw) ? gyaw : 0
+    s.vx = 0; s.vz = 0; s.yawRate = 0
+    s.speed = 0; s.slipAngle = 0; s.slipFront = 0; s.slipRear = 0
+    s.aLongSmooth = 0; s.wheelspin = 0; s.wallHit = 0
+    if (!Number.isFinite(s.rpm)) s.rpm = T.idleRpm
+  }
 }
 
 // --- car-vs-car collision: each car is two circles (front/rear) ---
@@ -308,6 +346,8 @@ function carPoints(c: { x: number; z: number; yaw: number }): Array<{ x: number;
 // symmetric resolution, both cars movable (server authority). Returns impact speed.
 export function collideCarPair(a: CarState, b: CarState): number {
   let hit = 0
+  // never let a non-finite car spread NaN into a healthy one through the push-out
+  if (!(Number.isFinite(a.x) && Number.isFinite(a.z) && Number.isFinite(b.x) && Number.isFinite(b.z))) return 0
   const rr = CAR_R * 2
   for (const pa of carPoints(a)) {
     for (const pb of carPoints(b)) {

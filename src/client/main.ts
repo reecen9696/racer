@@ -437,7 +437,7 @@ async function boot(): Promise<void> {
       if (seq % 30 === 0) {
         hud.setPlayers([
           { name: playerName, score: Math.floor(score.total), me: true },
-          ...[...net.remotes.values()].filter((r) => r.bot !== 1).map((r) => ({ name: r.name, score: r.score, me: false })), // the cop isn't competing
+          ...[...net.remotes.values()].filter((r) => !r.bot).map((r) => ({ name: r.name, score: r.score, me: false })), // neither the cop nor the traffic is competing
         ])
       }
 

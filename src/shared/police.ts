@@ -4,10 +4,13 @@
 import { CarState, InputFrame } from './physics'
 import { ParsedMap, RoadTile, dirtCenterlinePoint } from './map'
 import { TILE } from './constants'
+import {
+  Waypoint, clamp, wrapAngle, dist, steerToward, speedControl, pointAhead, carAhead, followSpeed,
+} from './driving'
 
 export type CopMode = 'patrol' | 'pursuit' | 'interrogate' | 'cooldown'
 
-export interface Waypoint { x: number; z: number }
+export type { Waypoint }
 
 export interface CopBrain {
   mode: CopMode
@@ -52,13 +55,6 @@ export const WEDGE_PROGRESS = 6 // m of real travel that counts as "he's moving 
 const PATROL_SPEED = 13 // m/s ≈ 47 km/h
 const PURSUIT_SPEED = 46 // just under player maxSpeed; rubber band does the rest
 const LANE_OFFSET = 2.1 // m right of centerline
-
-const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
-const wrapAngle = (a: number) => {
-  while (a > Math.PI) a -= Math.PI * 2
-  while (a < -Math.PI) a += Math.PI * 2
-  return a
-}
 
 const TILE_SAMPLES = 5 // per tile — corners are quarter arcs, so straight-lining cuts them
 
@@ -143,60 +139,20 @@ export function makeCopBrain(map: ParsedMap): CopBrain {
   }
 }
 
-// steer toward a world point; returns shaped steer input in -1..1
-function steerToward(cop: CarState, px: number, pz: number, gain = 2.2): number {
-  const heading = Math.atan2(px - cop.x, pz - cop.z)
-  const err = wrapAngle(heading - cop.yaw)
-  // reversing flips steering geometry
-  const dir = cop.speed < -0.5 ? -1 : 1
-  return clamp(err * gain * dir, -1, 1)
-}
-
-function dist(ax: number, az: number, bx: number, bz: number): number {
-  return Math.hypot(ax - bx, az - bz)
-}
-
-// Pure pursuit aims at a point a speed-scaled distance DOWN the path, never at the
-// next waypoint: the samples are ~3 m apart, so aiming at the nearest one is a 0.2 s
-// lookahead at patrol speed — the cop saws at the wheel and washes wide out of every
-// corner. Roughly a second of travel makes him track the ring cleanly at 47 km/h.
-function pointAhead(brain: CopBrain, cop: CarState, ahead: number): Waypoint {
-  const n = brain.path.length
-  let acc = 0
-  let px = cop.x, pz = cop.z
-  for (let k = 0; k < 30; k++) {
-    const w = brain.path[(brain.wpIndex + k) % n]
-    acc += dist(px, pz, w.x, w.z)
-    if (acc >= ahead) return w
-    px = w.x
-    pz = w.z
-  }
-  return brain.path[(brain.wpIndex + 29) % n]
-}
-
-// throttle/brake toward a target speed. Braking below walking pace is suppressed:
-// brake past standstill means REVERSE in this physics, so a hard stop would otherwise
-// trundle him backwards down the lane.
-function speedControl(cop: CarState, target: number): { throttle: number; brake: number } {
-  const err = target - cop.speed
-  if (err > 0.5) return { throttle: clamp(err / 6, 0.25, 1), brake: 0 }
-  // /4 not /10: a 2.6 m/s overspeed used to ask for 26% brake, which is a coast —
-  // he'd arrive at corners 10 km/h hot and understeer straight into the verge
-  if (err < -1 && cop.speed > 1) return { throttle: 0, brake: clamp(-err / 4, 0.3, 1) }
-  return { throttle: err > 0 ? 0.15 : 0, brake: 0 } // coast rather than creep over target
-}
-
 export interface CopStepResult {
   input: InputFrame
   pinnedNow: boolean // pin condition held this step
 }
 
-// One brain step. `players` = live sims (id → CarState). Mutates brain. Pure of Math.random.
+// One brain step. `players` = live sims (id → CarState). `traffic` = NPC civilians, which
+// he must not rear-end but never pursues, interrogates or counts as a witness. Mutates
+// brain. Pure of Math.random.
 export function stepCopBrain(
   brain: CopBrain,
   cop: CarState,
   players: Map<string, CarState>,
   dt: number,
+  traffic?: Map<string, CarState>,
 ): CopStepResult {
   brain.tick++
   for (const [id, t] of brain.immunity) {
@@ -402,9 +358,16 @@ export function stepCopBrain(
     curve += Math.abs(wrapAngle(h - prevH))
     prevH = h
   }
-  const targetSpeed = PATROL_SPEED * clamp(1 - curve * 0.3, 0.42, 1)
+  let targetSpeed = PATROL_SPEED * clamp(1 - curve * 0.3, 0.42, 1)
+  // Off duty he shares the lane with the civilians, and he patrols faster than they
+  // drive — without this he simply drives through the back of the traffic he's
+  // supposed to be policing. Pursuit deliberately skips this: nothing yields mid-chase.
+  if (traffic?.size) {
+    const ob = carAhead(cop, traffic)
+    if (ob) targetSpeed = Math.min(targetSpeed, followSpeed(cop, ob))
+  }
 
-  const aim = pointAhead(brain, cop, clamp(5 + Math.abs(cop.speed) * 0.85, 6, 20))
+  const aim = pointAhead(brain.path, brain.wpIndex, cop, clamp(5 + Math.abs(cop.speed) * 0.85, 6, 20))
   input.steer = steerToward(cop, aim.x, aim.z)
   const sc = speedControl(cop, targetSpeed)
   input.throttle = sc.throttle

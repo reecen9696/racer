@@ -8,9 +8,13 @@ import { parseMap, ParsedMap, Zone } from '../shared/map'
 import { makeScore, stepScore, DriftScore } from '../shared/scoring'
 import { CARS, carDef } from '../shared/cars'
 import { makeCopBrain, stepCopBrain, onCopHit, copSpawn, CopBrain, PIN_TIME, ARREST_IMMUNITY } from '../shared/police'
+import { makeTrafficBrains, stepTrafficBrain, trafficSpawn, TrafficBrain } from '../shared/traffic'
 import { Interrogation, InterrogationFacts, CHAT_TIME_LIMIT_S } from './interrogation'
 
 const COP_ID = 'npc:cop'
+// Civilian cars, in menu order — deliberately not the red estate most players drive,
+// so a pair of headlights in the distance reads as "someone else" at a glance.
+const TRAFFIC_CARS = [3, 5, 1, 6]
 
 const ZONE_NAMES: Record<Zone, string> = {
   v: 'the village lane, past the houses',
@@ -71,6 +75,7 @@ export class DriftRoom extends Room<DriftState> {
   private map!: ParsedMap
   private copBrain!: CopBrain
   private copCar!: CarState
+  private traffic: { brain: TrafficBrain; car: CarState }[] = []
   private interrogation: Interrogation | null = null
   private frozenId = '' // player frozen mid-interrogation
 
@@ -90,6 +95,22 @@ export class DriftRoom extends Room<DriftState> {
     cop.x = w0.x
     cop.z = w0.z
     this.state.players.set(COP_ID, cop)
+
+    // --- civilian traffic: same deal, minus the light bar. bot = 2 so the client
+    // renders them as ordinary cars and the leaderboard leaves them out ---
+    for (const [i, brain] of makeTrafficBrains(this.map).entries()) {
+      const w = trafficSpawn(brain)
+      const car = makeCarState(w.x, w.z, w.yaw)
+      const p = new PlayerState()
+      p.bot = 2
+      p.name = '' // no name tag floating over a car nobody's driving
+      p.car = TRAFFIC_CARS[i % TRAFFIC_CARS.length]
+      p.x = w.x
+      p.z = w.z
+      p.yaw = w.yaw
+      this.state.players.set(brain.id, p)
+      this.traffic.push({ brain, car })
+    }
 
     this.onMessage('input', (client, frames: InputFrame[]) => {
       const sim = this.sims.get(client.sessionId)
@@ -205,9 +226,34 @@ export class DriftRoom extends Room<DriftState> {
     // --- cop ---
     const playerCars = new Map<string, CarState>()
     for (const [id, sim] of this.sims) playerCars.set(id, sim.car)
-    const res = stepCopBrain(this.copBrain, this.copCar, playerCars, PHYS_DT)
+    const trafficCars = new Map<string, CarState>()
+    for (const t of this.traffic) trafficCars.set(t.brain.id, t.car)
+    const res = stepCopBrain(this.copBrain, this.copCar, playerCars, PHYS_DT, trafficCars)
     if (this.copBrain.mode !== 'interrogate') {
       stepCar(this.copCar, res.input, TUNING, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
+    }
+
+    // --- civilian traffic ---
+    // Every car on the road is an obstacle to them, including each other and the cop.
+    const road = new Map(playerCars)
+    road.set(COP_ID, this.copCar)
+    for (const [id, c] of trafficCars) road.set(id, c)
+    for (const t of this.traffic) {
+      const r = stepTrafficBrain(t.brain, t.car, road, PHYS_DT)
+      stepCar(t.car, r.input, TUNING, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
+      // same horn message a player sends — clients already play it positionally
+      if (r.honk) this.broadcast('horn', { id: t.brain.id })
+    }
+    // Traffic collisions are physical only: no aggro, no offence, no score. Running one
+    // off the road is your business, not the cop's.
+    for (let i = 0; i < this.traffic.length; i++) {
+      const t = this.traffic[i]
+      for (let j = i + 1; j < this.traffic.length; j++) collideCarPair(t.car, this.traffic[j].car)
+      if (this.copBrain.mode !== 'interrogate') collideCarPair(t.car, this.copCar)
+      for (const [id, sim] of this.sims) {
+        if (id === this.frozenId && this.copBrain.mode === 'interrogate') continue // don't shove a stopped driver mid-caution
+        collideCarPair(t.car, sim.car)
+      }
     }
 
     // cop-vs-player collisions + aggro (skip the frozen pair)
@@ -277,6 +323,22 @@ export class DriftRoom extends Room<DriftState> {
       c.pinT = this.copBrain.pinT
       c.copTarget = this.copBrain.targetId
       c.headlights = true
+    }
+
+    for (const t of this.traffic) {
+      const p = this.state.players.get(t.brain.id)
+      if (!p) continue
+      p.x = t.car.x
+      p.z = t.car.z
+      p.yaw = t.car.yaw
+      p.vx = t.car.vx
+      p.vz = t.car.vz
+      p.speed = t.car.speed
+      p.slip = t.car.slipAngle
+      p.rpm = t.car.rpm
+      p.gear = t.car.gear
+      p.brake = t.car.speed < 1 || t.brain.reverseT > 0 // brake lights when they're stopping for you
+      p.headlights = true
     }
   }
 
