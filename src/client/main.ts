@@ -644,8 +644,10 @@ async function boot(): Promise<void> {
     const pitch = Math.atan2(hF - hR, 3.2)
 
     // --- suspension: lean out of corners, dive under braking ---
-    // lateral accel ≈ v·ω; +yawRate is a right-hand turn, which drops the left
-    // side (positive rotation about the forward axis raises the car's right).
+    // lateral accel ≈ v·ω. +yawRate turns left, and a left turn throws weight onto
+    // the right wheels — which is also what a positive rotation about the forward
+    // axis does here (+X at yaw 0 is the car's LEFT, same as the `rightAxis` below,
+    // which is likewise named for the direction it rotates toward, not where it points).
     const rollTarget = THREE.MathUtils.clamp(car.speed * car.yawRate * 0.0045, -0.085, 0.085)
     // aLongSmooth is the physics' own weight-transfer accel: <0 braking → nose down
     const diveTarget = THREE.MathUtils.clamp(-car.aLongSmooth * 0.005, -0.028, 0.055)
