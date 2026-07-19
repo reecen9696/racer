@@ -19,7 +19,7 @@ export const TUNING = {
 
   engineForce: 8200, // N at full throttle (pre gear scaling) — deliberately more than the rear tires can put down in low gears
   brakeForce: 12500, // N (~1.05g) — corners are taken by braking down to ~50, so brakes must be strong
-  reverseForce: 9500, // N — snappy reverse, no crawl
+  reverseForce: 9500, // N — gear-scaled like engineForce, so reverse pulls as hard as forward
   maxSpeed: 52, // m/s soft cap (~187 km/h)
 
   gripFront: 3.2, // peak lateral μ per axle (force = μ × load) — arcade scale, NOT real tires.

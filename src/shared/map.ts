@@ -8,7 +8,7 @@ import { TILE, CAR_LENGTH, CAR_WIDTH } from './constants'
 import { AABB, SurfaceSampler } from './physics'
 import {
   TACOS_BOUNDS, TACOS_NS_BANDS, TACOS_EW_BANDS, TACOS_ROAD_X, TACOS_ROAD_Z,
-  TACOS_LAMPS, TACOS_COLLIDERS,
+  TACOS_LAMPS, TACOS_COLLIDERS, TACOS_PAVED,
 } from './tacosTown.generated'
 
 export const MAP_TEXT = `
@@ -165,6 +165,10 @@ const inTacosTown = (x: number, z: number, pad = 0): boolean =>
   x >= TACOS_TOWN.x + TACOS_BOUNDS.minX - pad && x <= TACOS_TOWN.x + TACOS_BOUNDS.maxX + pad &&
   z >= TACOS_TOWN.z + TACOS_BOUNDS.minZ - pad && z <= TACOS_TOWN.z + TACOS_BOUNDS.maxZ + pad
 
+// paved forecourts (OXXO's parking lot) — local coords, tarmac like the streets
+const inTacosPaved = (lx: number, lz: number): boolean =>
+  TACOS_PAVED.some((p) => lx >= p.minX && lx <= p.maxX && lz >= p.minZ && lz <= p.maxZ)
+
 // street grid: asphalt inside the measured corridors, concrete elsewhere in town
 const tacosSurface = (x: number, z: number): 'asphalt' | 'curb' | null => {
   if (!inTacosTown(x, z)) return null
@@ -172,7 +176,7 @@ const tacosSurface = (x: number, z: number): 'asphalt' | 'curb' | null => {
   const lz = z - TACOS_TOWN.z
   const ns = TACOS_NS_BANDS.some(([a, b]) => lx >= a && lx <= b) && lz >= TACOS_ROAD_Z[0] && lz <= TACOS_ROAD_Z[1]
   const ew = TACOS_EW_BANDS.some(([a, b]) => lz >= a && lz <= b) && lx >= TACOS_ROAD_X[0] && lx <= TACOS_ROAD_X[1]
-  return ns || ew ? 'asphalt' : 'curb'
+  return ns || ew || inTacosPaved(lx, lz) ? 'asphalt' : 'curb'
 }
 
 export function parseMap(): ParsedMap {
@@ -809,6 +813,62 @@ export function parseMap(): ParsedMap {
     props.push({ kind: 'lampProp', x: lx, z: lz, rot: head.rot, variant: 0 })
   }
 
+  // street lights down every town street: game lampposts every ~16 m, alternating
+  // sides, pole 1.4 m off the asphalt edge, arm aimed over the roadway. Slots too
+  // close to the model's own lamps / the corner lamps, or fouling a building, are
+  // dropped. Lamps+poles carry no colliders, so this is render/bake-only.
+  {
+    // per-street pole lines pinned to the ACTUAL footpath strips (the corridor
+    // bands include intersection bulges/sidewalks, so "band edge + margin" put
+    // poles in grass on the west street). Ring streets only have a path on their
+    // inner side; the two central streets take alternating sides.
+    const streetRows: Array<{ axis: 'ns' | 'ew'; mid: number; lo: number; hi: number; offs: number[] }> = [
+      { axis: 'ns', mid: -72, lo: TACOS_ROAD_Z[0] + 6, hi: TACOS_ROAD_Z[1] - 6, offs: [-60.6] }, // west st → east path
+      { axis: 'ns', mid: 16, lo: TACOS_ROAD_Z[0] + 6, hi: TACOS_ROAD_Z[1] - 6, offs: [4.6, 27.3] }, // main NS, both
+      { axis: 'ns', mid: 104, lo: TACOS_ROAD_Z[0] + 6, hi: TACOS_ROAD_Z[1] - 6, offs: [92.4] }, // east st → west path
+      { axis: 'ew', mid: -97.6, lo: TACOS_ROAD_X[0] + 6, hi: TACOS_ROAD_X[1] - 6, offs: [-86.2] }, // south st → north path
+      { axis: 'ew', mid: -8.7, lo: TACOS_ROAD_X[0] + 6, hi: TACOS_ROAD_X[1] - 6, offs: [-21.0, 3.6] }, // main EW, both
+      { axis: 'ew', mid: 78.3, lo: TACOS_ROAD_X[0] + 6, hi: TACOS_ROAD_X[1] - 6, offs: [66.9] }, // north st → south path
+    ]
+    let li = 0
+    for (const row of streetRows) {
+      const mid = row.mid
+      for (let along = row.lo; along < row.hi; along += 12) {
+        li++
+        const off = row.offs[li % row.offs.length]
+        const lx = row.axis === 'ns' ? off : along
+        const lz = row.axis === 'ns' ? along : off
+        const x = TACOS_TOWN.x + lx
+        const z = TACOS_TOWN.z + lz
+        // never in the roadway — the pole line crosses the other street's asphalt
+        // at every intersection
+        if (tacosSurface(x, z) !== 'curb') continue
+        // don't double up on an existing lamp
+        let clash = false
+        for (const l of lamps) {
+          if ((x - l.x) ** 2 + (z - l.z) ** 2 < 10 * 10) { clash = true; break }
+        }
+        if (clash) continue
+        // street lamps belong on the verge, never on a private forecourt — and
+        // a shell collider is hollow, so its interior reads as clear ground
+        if (inTacosPaved(x - TACOS_TOWN.x, z - TACOS_TOWN.z)) continue
+        // don't plant a pole inside a building/prop
+        for (const c of TACOS_COLLIDERS) {
+          if (
+            x > TACOS_TOWN.x + c.minX - 1.2 && x < TACOS_TOWN.x + c.maxX + 1.2 &&
+            z > TACOS_TOWN.z + c.minZ - 1.2 && z < TACOS_TOWN.z + c.maxZ + 1.2
+          ) { clash = true; break }
+        }
+        if (clash) continue
+        const tx = TACOS_TOWN.x + (row.axis === 'ns' ? mid : along)
+        const tz = TACOS_TOWN.z + (row.axis === 'ns' ? along : mid)
+        const head = lampHead(x, z, tx, tz)
+        lamps.push({ x: head.hx, z: head.hz, color: SODIUM, radius: 13, intensity: 1.0, height: 5.2 })
+        props.push({ kind: 'lampProp', x, z, rot: head.rot, variant: 0 })
+      }
+    }
+  }
+
   // trees filling the town's open grass blocks: dense deterministic scatter,
   // 3 m off any street asphalt, 2 m clear of every building/prop collider
   const townTreeClear = (x: number, z: number, probe = 3): boolean => {
@@ -835,6 +895,100 @@ export function parseMap(): ParsedMap {
     const kind = r < 0.35 ? 'tree_big' : r < 0.65 ? 'tree_small' : 'bush'
     props.push({ kind, x, z, rot: hash2(i, 405) * Math.PI * 2, variant: Math.floor(hash2(i, 406) * 12) })
     if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
+  }
+
+  // containment ring: the town border is walled by dense forest so players can't
+  // wander off the set piece — 4 collider strips just outside the skirt (the west
+  // one splits around the entry street), dressed with tight staggered tree ranks
+  {
+    const bMinX = TACOS_TOWN.x + TACOS_BOUNDS.minX
+    const bMaxX = TACOS_TOWN.x + TACOS_BOUNDS.maxX
+    const bMinZ = TACOS_TOWN.z + TACOS_BOUNDS.minZ
+    const bMaxZ = TACOS_TOWN.z + TACOS_BOUNDS.maxZ
+    const gapLo = TACOS_TOWN.z + TACOS_EW_BANDS[1][0] - 1 // entry street stays open
+    const gapHi = TACOS_TOWN.z + TACOS_EW_BANDS[1][1] + 1
+    colliders.push(
+      { minX: bMinX - 8, maxX: bMaxX + 8, minZ: bMinZ - 6, maxZ: bMinZ - 2 }, // north
+      { minX: bMinX - 8, maxX: bMaxX + 8, minZ: bMaxZ + 2, maxZ: bMaxZ + 6 }, // south
+      { minX: bMaxX + 2, maxX: bMaxX + 6, minZ: bMinZ - 6, maxZ: bMaxZ + 6 }, // east
+      { minX: bMinX - 6, maxX: bMinX - 2, minZ: bMinZ - 6, maxZ: gapLo }, // west, above entry
+      { minX: bMinX - 6, maxX: bMinX - 2, minZ: gapHi, maxZ: bMaxZ + 6 }, // west, below entry
+    )
+    // tree ranks along the whole border (visual density; the strips do the stopping)
+    const edges: Array<{ axis: 'x' | 'z'; fixed: number; dir: 1 | -1; lo: number; hi: number; gap?: [number, number] }> = [
+      { axis: 'x', fixed: bMinZ, dir: -1, lo: bMinX - 10, hi: bMaxX + 10 },
+      { axis: 'x', fixed: bMaxZ, dir: 1, lo: bMinX - 10, hi: bMaxX + 10 },
+      { axis: 'z', fixed: bMaxX, dir: 1, lo: bMinZ - 10, hi: bMaxZ + 10 },
+      { axis: 'z', fixed: bMinX, dir: -1, lo: bMinZ - 10, hi: bMaxZ + 10, gap: [gapLo, gapHi] },
+    ]
+    let ri = 0
+    for (const e of edges) {
+      for (let along = e.lo; along < e.hi; along += 2.8) {
+        for (let rank = 0; rank < 3; rank++) {
+          ri++
+          if (hash2(ri, 431) > 0.85) continue
+          const out = e.fixed + e.dir * (2.5 + rank * 3.2 + hash2(ri, 432) * 2)
+          const jit = (hash2(ri, 433) - 0.5) * 2.2
+          const x = e.axis === 'x' ? along + jit : out
+          const z = e.axis === 'x' ? out : along + jit
+          if (e.gap && z > e.gap[0] - 3 && z < e.gap[1] + 3) continue
+          if (!clearOfRoad(x, z)) continue
+          const big = hash2(ri, 434) < 0.72
+          props.push({ kind: big ? 'tree_big' : 'tree_small', x, z, rot: hash2(ri, 435) * Math.PI * 2, variant: Math.floor(hash2(ri, 436) * 12) })
+        }
+      }
+    }
+    // extra clumps piled onto the four outside corners
+    for (const [cx, cz] of [[bMinX, bMinZ], [bMaxX, bMinZ], [bMinX, bMaxZ], [bMaxX, bMaxZ]] as const) {
+      for (let i = 0; i < 46; i++) {
+        ri++
+        const a = hash2(ri, 441) * Math.PI * 2
+        const d = 2 + hash2(ri, 442) * 16
+        const x = cx + Math.cos(a) * d
+        const z = cz + Math.sin(a) * d
+        if (inTacosTown(x, z, -1) || !clearOfRoad(x, z)) continue
+        const big = hash2(ri, 443) < 0.75
+        props.push({ kind: big ? 'tree_big' : 'tree_small', x, z, rot: hash2(ri, 444) * Math.PI * 2, variant: Math.floor(hash2(ri, 445) * 12) })
+      }
+    }
+  }
+
+  // extra bushes filling the open block squares
+  for (let i = 0; i < 4200; i++) {
+    const x = TACOS_TOWN.x + TACOS_BOUNDS.minX + 4 + hash2(i, 451) * (TACOS_BOUNDS.maxX - TACOS_BOUNDS.minX - 8)
+    const z = TACOS_TOWN.z + TACOS_BOUNDS.minZ + 4 + hash2(i, 452) * (TACOS_BOUNDS.maxZ - TACOS_BOUNDS.minZ - 8)
+    if (hash2(i, 453) > 0.85) continue
+    if (!townTreeClear(x, z, 2.2)) continue
+    props.push({ kind: 'bush', x, z, rot: hash2(i, 454) * Math.PI * 2, variant: Math.floor(hash2(i, 455) * 12) })
+  }
+
+  // rocks dotted through the squares and out onto the fringe grass
+  for (let i = 0; i < 1400; i++) {
+    const x = TACOS_TOWN.x + TACOS_BOUNDS.minX - 20 + hash2(i, 461) * (TACOS_BOUNDS.maxX - TACOS_BOUNDS.minX + 40)
+    const z = TACOS_TOWN.z + TACOS_BOUNDS.minZ - 20 + hash2(i, 462) * (TACOS_BOUNDS.maxZ - TACOS_BOUNDS.minZ + 40)
+    if (hash2(i, 463) > 0.5) continue
+    if (inTacosTown(x, z)) {
+      if (!townTreeClear(x, z, 2.0)) continue
+    } else if (!clearOfRoad(x, z)) continue
+    props.push({ kind: 'rock', x, z, rot: hash2(i, 464) * Math.PI * 2, variant: i % 2 })
+  }
+
+  // a few cars parked up on the footpaths (ring-street sidewalks are ~3 m wide)
+  {
+    const parkedSpots: Array<[number, number, number]> = [
+      [-60.5, 30, 0.12], // west street inner sidewalk, nose south
+      [-60.6, -48, Math.PI - 0.08], // west street inner sidewalk, nose north
+      [30, 66.8, Math.PI / 2 + 0.1], // north street south sidewalk, nose east
+      [92.4, -52, 0.05], // east street outer sidewalk, nose south
+      [52, -86.3, -Math.PI / 2 - 0.07], // south street north sidewalk, nose west
+    ]
+    parkedSpots.forEach(([lx, lz, rot], i) => {
+      const x = TACOS_TOWN.x + lx
+      const z = TACOS_TOWN.z + lz
+      props.push({ kind: 'parked', x, z, rot, variant: i % 4 })
+      const ns = Math.abs(Math.sin(rot)) < 0.5 // pointing along z → long in z
+      colliders.push(box(x, z, ns ? 1.0 : 2.3, ns ? 2.3 : 1.0))
+    })
   }
 
   // street-border trees: rows marching along every town street, ~7 m pitch with

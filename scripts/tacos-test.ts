@@ -2,6 +2,7 @@
 import { makeCarState, stepCar, InputFrame } from '../src/shared/physics'
 import { TUNING, PHYS_DT, TILE } from '../src/shared/constants'
 import { parseMap, TACOS_TOWN } from '../src/shared/map'
+import { TACOS_PAVED } from '../src/shared/tacosTown.generated'
 
 const map = parseMap()
 let fail = 0
@@ -48,6 +49,37 @@ check('town colliders registered', townBoxes.length > 100, String(townBoxes.leng
   // OXXO front face: local z -0.5 → world TACOS_TOWN.z - 0.5
   const oxxoFront = TACOS_TOWN.z - 0.5
   check('car stopped by OXXO wall', car.z < oxxoFront + 1.2, `z=${car.z.toFixed(1)} wall=${oxxoFront.toFixed(1)} v=${(car.speed * 3.6).toFixed(0)}km/h`)
+}
+
+// --- the OXXO forecourt must be drivable, not a wall ---
+// The store and its parking slab are one FBX mesh; a plain AABB collider seals
+// the lot. tacos-dump rasterizes the shell so only the walls are solid.
+{
+  const car = makeCarState(TACOS_TOWN.x + 1, TACOS_TOWN.z - 9, 0) // on the EW street, facing the lot
+  const input: InputFrame = { seq: 0, steer: 0, throttle: 1, brake: 0, handbrake: false, headlights: true }
+  for (let i = 0; i < 60 * 6; i++) stepCar(car, input, TUNING, PHYS_DT, map.surfaceAt, map.colliders, undefined)
+  const lz = car.z - TACOS_TOWN.z
+  check('car drives into the OXXO lot', lz > 15, `z-local=${lz.toFixed(1)} (lot spans 0..24)`)
+  check('lot still bounded to the north', lz < 26, `z-local=${lz.toFixed(1)}`)
+}
+
+// --- nothing natural may grow on the paved forecourt ---
+// The scatters plant on any non-road 'curb' ground clear of a collider, so
+// opening the lot up made it a prime spot for trees/bushes/rocks. TACOS_PAVED
+// marks it asphalt; the lamp planter skips it too (a shell collider is hollow,
+// so its interior otherwise reads as clear ground and gets a pole inside).
+{
+  for (const lot of TACOS_PAVED) {
+    for (const margin of [0, 2]) {
+      const on = map.props.filter((p) => {
+        const lx = p.x - TACOS_TOWN.x, lz = p.z - TACOS_TOWN.z
+        return lx > lot.minX - margin && lx < lot.maxX + margin && lz > lot.minZ - margin && lz < lot.maxZ + margin
+      })
+      check(`paved lot clear of props (+${margin}m)`, on.length === 0, on.map((p) => p.kind).join(',') || 'clear')
+    }
+    const mid = { x: TACOS_TOWN.x + (lot.minX + lot.maxX) / 2, z: TACOS_TOWN.z + (lot.minZ + lot.maxZ) / 2 }
+    check('paved lot is tarmac', map.surfaceAt(mid.x, mid.z) === 'asphalt', map.surfaceAt(mid.x, mid.z))
+  }
 }
 
 // --- collision: drive west→east into the east-row buildings on main street ---

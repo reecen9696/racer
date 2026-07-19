@@ -10,6 +10,10 @@ export const TACOS_EW_BANDS: Array<[number, number]> = [[-107.6,-87.7],[-19.6,2.
 export const TACOS_ROAD_X: [number, number] = [-82,113.9]
 export const TACOS_ROAD_Z: [number, number] = [-107.6,88.3]
 
+// paved lots (a shell mesh's own slab): drivable tarmac, and off-limits to the
+// tree scatter — without this, trees sprout across the OXXO forecourt
+export const TACOS_PAVED: TacosBox[] = [{"minX":-21.03,"minZ":-0.47,"maxX":6,"maxZ":24.04}]
+
 // meshes hidden client-side to open the west entry (their colliders are dropped too)
 export const TACOS_HIDDEN: string[] = ["buildings_21003","buildings_03002"]
 
@@ -49,8 +53,10 @@ export const TACOS_COLLIDERS: TacosBox[] = [
   { minX: -3.99, minZ: 87.39, maxX: 3.14, maxZ: 101.35 },
   { minX: -42.21, minZ: -2.81, maxX: -40.81, maxZ: -1.41 },
   { minX: -91.21, minZ: 8.02, maxX: -81.21, maxZ: 24.47 },
-  { minX: -3.16, minZ: 11.01, maxX: -3.01, maxZ: 13.26 },
-  { minX: -21.03, minZ: -0.47, maxX: 6, maxZ: 24.04 },
+  { minX: -21.03, minZ: 0.03, maxX: -4.53, maxZ: 0.53 },
+  { minX: -21.03, minZ: 0.53, maxX: -20.53, maxZ: 24.53 },
+  { minX: -5.03, minZ: 0.53, maxX: -4.53, maxZ: 24.53 },
+  { minX: -20.53, minZ: 24.03, maxX: -5.03, maxZ: 24.53 },
   { minX: 79.76, minZ: -28.05, maxX: 95.27, maxZ: -18.54 },
   { minX: 57.36, minZ: -28.86, maxX: 66.28, maxZ: -19.42 },
   { minX: -2.56, minZ: -60.2, maxX: 6.35, maxZ: -52.51 },
@@ -60,7 +66,6 @@ export const TACOS_COLLIDERS: TacosBox[] = [
   { minX: 66.46, minZ: -2.41, maxX: 66.86, maxZ: -2.02 },
   { minX: -20.12, minZ: 86.7, maxX: -13.12, maxZ: 98.68 },
   { minX: -4.92, minZ: 39.2, maxX: 6.4, maxZ: 48.04 },
-  { minX: -3.16, minZ: 5.46, maxX: -3.01, maxZ: 7.71 },
   { minX: 87.21, minZ: -3.08, maxX: 88.61, maxZ: -1.68 },
   { minX: 43.46, minZ: 87.55, maxX: 51.15, maxZ: 96.45 },
   { minX: 113.18, minZ: 2.2, maxX: 123.31, maxZ: 11.65 },
@@ -89,8 +94,6 @@ export const TACOS_COLLIDERS: TacosBox[] = [
   { minX: 5.92, minZ: -32.14, maxX: 6.05, maxZ: -19.6 },
   { minX: 113.32, minZ: -10.06, maxX: 118.26, maxZ: -4.61 },
   { minX: 4.95, minZ: -16.13, maxX: 5.41, maxZ: -15.67 },
-  { minX: -3.16, minZ: 16.72, maxX: -3.01, maxZ: 18.98 },
-  { minX: -3.16, minZ: 8.21, maxX: -3.01, maxZ: 10.47 },
   { minX: 25.61, minZ: 58.07, maxX: 36.14, maxZ: 68.03 },
   { minX: 34.92, minZ: -0.87, maxX: 46.12, maxZ: 11.69 },
   { minX: -90.14, minZ: -29.57, maxX: -81.14, maxZ: -22.68 },
@@ -107,7 +110,6 @@ export const TACOS_COLLIDERS: TacosBox[] = [
   { minX: 72.76, minZ: 0.3, maxX: 81.09, maxZ: 9.82 },
   { minX: 41.34, minZ: -2.65, maxX: 42.75, maxZ: -1.25 },
   { minX: -89.86, minZ: -44.91, maxX: -80.35, maxZ: -29.41 },
-  { minX: -3.14, minZ: 2.59, maxX: -3, maxZ: 4.84 },
   { minX: 1.28, minZ: -14.96, maxX: 2.12, maxZ: -14.24 },
   { minX: 17.78, minZ: -117.92, maxX: 28.98, maxZ: -105.37 },
   { minX: 25.74, minZ: 49.26, maxX: 32.99, maxZ: 58.1 },
@@ -123,7 +125,6 @@ export const TACOS_COLLIDERS: TacosBox[] = [
   { minX: 113.3, minZ: -22.84, maxX: 120.05, maxZ: -17.69 },
   { minX: 8.11, minZ: 36.78, maxX: 9.51, maxZ: 38.19 },
   { minX: 25.47, minZ: 25.75, maxX: 32.22, maxZ: 30.9 },
-  { minX: -3.16, minZ: 13.78, maxX: -3.01, maxZ: 16.03 },
   { minX: -28.87, minZ: 0.27, maxX: -20.92, maxZ: 9.09 },
   { minX: 22.93, minZ: -47.98, maxX: 24.32, maxZ: -46.58 },
   { minX: 24.48, minZ: -80.37, maxX: 35.07, maxZ: -69.66 },

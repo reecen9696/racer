@@ -20,9 +20,10 @@
 // an edge — it depends on which way you leave, so it's generated per (in, out) pair
 // when the route is extended.
 import { ParsedMap, RoadTile, Zone, dirtCenterlinePoint, TACOS_TOWN } from './map'
-import { TILE } from './constants'
+import { AABB } from './physics'
+import { TILE, CAR_WIDTH, CAR_LENGTH } from './constants'
 import { Waypoint, clamp, dist } from './driving'
-import { TACOS_NS_BANDS, TACOS_EW_BANDS, TACOS_ROAD_X, TACOS_ROAD_Z } from './tacosTown.generated'
+import { TACOS_BOUNDS, TACOS_NS_BANDS, TACOS_EW_BANDS, TACOS_ROAD_X } from './tacosTown.generated'
 
 export type Dir = 'n' | 'e' | 's' | 'w'
 const DIRS: Dir[] = ['n', 'e', 's', 'w']
@@ -36,7 +37,14 @@ const OPP: Record<Dir, Dir> = { n: 's', s: 'n', e: 'w', w: 'e' }
 // used for oncoming traffic, now falling out of the route direction itself.
 const LANE_OFFSET_ROAD = 2.1
 const LANE_OFFSET_HWY = 3.5
-const LANE_OFFSET_TOWN = 5.0
+// The town looks like it has 20 m streets — that's the asphalt band width — but the
+// buildings overhang it, and the genuinely drivable corridor is as narrow as 6 m and
+// sits off-centre by up to 2.4 m. Driving the band centre with a 5 m offset put 54
+// waypoints and 6 junction turns INSIDE building colliders, so cars wedged on a wall,
+// reversed out at 23 km/h and hit whatever was behind them: every collision in the
+// first town run traced back to this. Lanes are laid on the measured clear corridor
+// instead (see townLaneCentres), which fits ±2.5 m on every street with room to spare.
+const LANE_OFFSET_TOWN = 2.5
 
 const TILE_SAMPLES = 5 // per tile — corners are quarter arcs, straight-lining cuts them
 const TOWN_SPACING = 3.2 // m between town waypoints, ~matching the tile sampling density
@@ -172,11 +180,65 @@ const onThrough = (node: RoadNode, arm: Dir): boolean =>
 // an NS with an EW band is an intersection. Anchored into world space by TACOS_TOWN.
 const bandCentres = (bands: Array<[number, number]>): number[] => bands.map(([a, b]) => (a + b) / 2)
 
-function buildTown(graph: RoadGraph): { entryNodeId: string; entryX: number; entryZ: number } | null {
-  const nsX = bandCentres(TACOS_NS_BANDS)
-  const ewZ = bandCentres(TACOS_EW_BANDS)
-  if (!nsX.length || !ewZ.length) return null
+// Half the diagonal of a car — the clearance a lane needs from any collider for the
+// body to fit however the car is yawed.
+const CAR_R = Math.hypot(CAR_WIDTH, CAR_LENGTH) / 2
+
+// Shift each town street sideways onto the middle of the corridor that is ACTUALLY
+// clear of buildings, rather than trusting the asphalt band's centre.
+//
+// The band is the painted road; the colliders are the buildings, and on several streets
+// they eat one side of it. Sampling laterally for the widest run that stays CAR_R clear
+// along the whole street finds windows from 6.0 m to 14.8 m wide, centred anywhere from
+// -2.4 m to +0.4 m off the band. Every one of them fits a ±2.5 m pair of lanes once the
+// centre is right. Measured at build time, so re-exporting the town model can move the
+// buildings and the lanes follow them.
+function townLaneCentres(
+  colliders: AABB[], centres: number[], from: number, to: number,
+  point: (centre: number, lat: number, along: number) => [number, number],
+): number[] {
+  const clearance = (x: number, z: number): number => {
+    let best = Infinity
+    for (const c of colliders) {
+      const dx = Math.max(c.minX - x, 0, x - c.maxX)
+      const dz = Math.max(c.minZ - z, 0, z - c.maxZ)
+      const d = Math.hypot(dx, dz)
+      if (d < best) best = d
+    }
+    return best
+  }
+  return centres.map((centre) => {
+    let bs = 0, be = 0, cs = NaN, ce = NaN
+    for (let lat = -9; lat <= 9; lat += 0.25) {
+      let ok = true
+      for (let t = from; t <= to && ok; t += 1.5) {
+        const [x, z] = point(centre, lat, t)
+        if (clearance(x, z) < CAR_R) ok = false
+      }
+      if (!ok) { cs = NaN; continue }
+      if (Number.isNaN(cs)) { cs = lat; ce = lat } else ce = lat
+      if (ce - cs > be - bs) { bs = cs; be = ce }
+    }
+    return be > bs ? (bs + be) / 2 : 0
+  })
+}
+
+function buildTown(map: ParsedMap, graph: RoadGraph): { entryNodeId: string; entryX: number; entryZ: number } | null {
+  const nsBand = bandCentres(TACOS_NS_BANDS)
+  const ewBand = bandCentres(TACOS_EW_BANDS)
+  if (!nsBand.length || !ewBand.length) return null
   const off = laneOffsetFor('town')
+
+  // only the town's own colliders matter here, and scanning the rest is wasted work
+  const local = map.colliders.filter(
+    (c) => c.maxX > TACOS_TOWN.x + TACOS_BOUNDS.minX && c.minX < TACOS_TOWN.x + TACOS_BOUNDS.maxX &&
+           c.maxZ > TACOS_TOWN.z + TACOS_BOUNDS.minZ && c.minZ < TACOS_TOWN.z + TACOS_BOUNDS.maxZ)
+  const nsShift = townLaneCentres(local, nsBand, ewBand[0], ewBand[ewBand.length - 1],
+    (c, lat, t) => [TACOS_TOWN.x + c + lat, TACOS_TOWN.z + t])
+  const ewShift = townLaneCentres(local, ewBand, nsBand[0], nsBand[nsBand.length - 1],
+    (c, lat, t) => [TACOS_TOWN.x + t, TACOS_TOWN.z + c + lat])
+  const nsX = nsBand.map((c, i) => c + nsShift[i])
+  const ewZ = ewBand.map((c, j) => c + ewShift[j])
 
   for (let i = 0; i < nsX.length; i++) {
     for (let j = 0; j < ewZ.length; j++) {
@@ -325,7 +387,7 @@ export function buildRoadGraph(map: ParsedMap): RoadGraph {
     tileMap.get(`${t.gx + DIR_VEC[d][0]},${t.gz + DIR_VEC[d][1]}`)
 
   for (const t of map.tiles) if (degreeOf(t) >= 3) graph.nodes.set(tileNodeId(t), makeTileNode(t))
-  const town = buildTown(graph)
+  const town = buildTown(map, graph)
 
   for (const node of [...graph.nodes.values()]) {
     if (!node.tile) continue
@@ -383,6 +445,13 @@ export interface RouteSeg {
   start: number // inclusive index into route.path
   end: number // exclusive
   minor: boolean // crossing only: we arrive on a give-way arm
+  // Which way we turn across the junction, and where oncoming traffic would come from.
+  // Lane offset is right of travel, so we drive on the right and a LEFT turn cuts across
+  // the opposing through lane — a conflict the major/minor arm rule alone never sees,
+  // because a left-turner is on the through road and so has priority over everything
+  // except the traffic it is turning in front of.
+  turn: 'l' | 'r' | 's' | 'u'
+  oncomingDir: [number, number] | null // unit vector from the node toward the opposing arm
 }
 
 export interface Route {
@@ -453,10 +522,26 @@ function pickNext(graph: RoadGraph, route: Route, node: RoadNode, from: RoadEdge
   return graph.edges.get(cands[cands.length - 1])!
 }
 
-function pushSeg(route: Route, kind: RouteSeg['kind'], id: string, pts: Waypoint[], minor = false): void {
+function pushSeg(
+  route: Route, kind: RouteSeg['kind'], id: string, pts: Waypoint[],
+  minor = false, turn: RouteSeg['turn'] = 's', oncomingDir: [number, number] | null = null,
+): void {
   const start = route.path.length
   route.path.push(...pts)
-  route.segs.push({ kind, id, start, end: route.path.length, minor })
+  route.segs.push({ kind, id, start, end: route.path.length, minor, turn, oncomingDir })
+}
+
+// Which way the junction turns us. `entryArm` points out from the node toward where we
+// came from, so our direction of travel INTO the node is its negation.
+function turnOf(entryArm: Dir, exitArm: Dir): RouteSeg['turn'] {
+  const [ix, iz] = DIR_VEC[entryArm]
+  const fx = -ix, fz = -iz // travelling this way into the junction
+  const [ox, oz] = DIR_VEC[exitArm]
+  // right of a heading (fx,fz) in this frame is (fz,-fx) — the same convention the lane
+  // offset uses, which is what makes "right turn" mean "no oncoming lane to cross"
+  if (ox === fz && oz === -fx) return 'r'
+  if (ox === -fz && oz === fx) return 'l'
+  return ox === fx && oz === fz ? 's' : 'u'
 }
 
 // Append edges until there is at least `minAhead` waypoints of route in front.
@@ -465,7 +550,11 @@ export function extendRoute(route: Route, graph: RoadGraph, minAhead = MIN_AHEAD
     const from = graph.edges.get(route.lastEdge)!
     const node = graph.nodes.get(from.to)!
     const next = pickNext(graph, route, node, from)
-    pushSeg(route, 'crossing', node.id, crossingPts(node, from.entryArm, next.exitArm, laneOffsetFor(next.zone)), from.minorAtTo)
+    pushSeg(
+      route, 'crossing', node.id,
+      crossingPts(node, from.entryArm, next.exitArm, laneOffsetFor(next.zone)),
+      from.minorAtTo, turnOf(from.entryArm, next.exitArm), DIR_VEC[OPP[from.entryArm]],
+    )
     pushSeg(route, 'edge', next.id, next.pts)
     route.townRun = isTown(next.to) ? route.townRun + 1 : 0
     route.lastEdge = next.id
@@ -525,6 +614,19 @@ export function seatRoute(
   return makeRoute(graph, edgeId, (seat + 1) * 2654435761 + seed, (seat % 3) / 3)
 }
 
+// Which kind of road the driver is currently on. Used for the town speed limit — the
+// grid has 70 m blocks and a junction every one of them, and a car taking those at the
+// open-road cruise of 45 km/h is both wrong to look at and arriving at each crossing
+// with less time to read it than the give-way logic needs.
+export function currentZone(route: Route, graph: RoadGraph): Zone | 'town' | null {
+  for (const seg of route.segs) {
+    if (seg.end <= route.wpIndex || seg.start > route.wpIndex) continue
+    if (seg.kind === 'edge') return graph.edges.get(seg.id)?.zone ?? null
+    return seg.id.startsWith('town:') ? 'town' : null // mid-junction
+  }
+  return null
+}
+
 // Nearest point on the whole network, as an edge plus how far along it. This is what
 // the recovery paths want: a car that has been punted into a field is not necessarily
 // anywhere near its own stale route, so "snap to my nearest waypoint" can drag it back
@@ -557,26 +659,34 @@ export interface JunctionAhead {
   node: RoadNode
   dist: number // m of path between the driver and the junction's entry
   minor: boolean // we arrive on a give-way arm and must yield if anything conflicts
+  turn: RouteSeg['turn']
+  oncomingDir: [number, number] | null
 }
 
-// The next junction along the route, if it's close enough to matter.
+// The next junction along the route, if it's close enough to matter — and only while
+// we can still stop short of it.
+//
+// Segments we are already INSIDE are skipped, and that is the whole point. A driver
+// that keeps reporting the junction it is standing in will happily brake to a halt
+// across the middle of it the moment anything conflicts, which blocks every other arm
+// and turns one hesitation into a four-car pile-up. Measured: it was the sole cause of
+// all 25 collisions in the first town run, every one of them at an all-way crossing.
+// Once you are in the box you are committed; you drive out.
 export function junctionAhead(route: Route, graph: RoadGraph, x: number, z: number, maxDist = 30): JunctionAhead | null {
   for (const seg of route.segs) {
-    if (seg.kind !== 'crossing' || seg.end <= route.wpIndex) continue
+    if (seg.kind !== 'crossing' || seg.start <= route.wpIndex) continue
     const node = graph.nodes.get(seg.id)
     if (!node) return null
     // walk the path from the driver to the crossing's first waypoint
     let d = 0
     let px = x, pz = z
-    const stop = Math.max(route.wpIndex, seg.start)
-    for (let i = route.wpIndex; i < stop; i++) {
+    for (let i = route.wpIndex; i < seg.start; i++) {
       d += dist(px, pz, route.path[i].x, route.path[i].z)
       px = route.path[i].x
       pz = route.path[i].z
       if (d > maxDist) return null
     }
-    if (seg.start <= route.wpIndex) d = 0 // already inside it
-    return d > maxDist ? null : { node, dist: d, minor: seg.minor }
+    return { node, dist: d, minor: seg.minor, turn: seg.turn, oncomingDir: seg.oncomingDir }
   }
   return null
 }
@@ -595,11 +705,17 @@ const JAM_TIME = 6 // s stopped at a give-way before we take the gap anyway
 export function junctionYield(
   j: JunctionAhead,
   selfId: string,
-  self: { x: number; z: number },
+  self: { x: number; z: number; speed: number },
   others: Iterable<[string, { x: number; z: number; speed: number }]>,
   jamT: number,
 ): number {
-  if (!j.minor) return Infinity
+  // Three ways to owe someone else the junction, and a driver with none of them never
+  // slows down — which is what keeps the through road feeling like a road.
+  //   'all'      — we're on a give-way arm, or it's an all-way: whoever got there first
+  //   'oncoming' — we have priority but are turning across the opposing lane
+  const mode: 'none' | 'all' | 'oncoming' =
+    j.minor ? 'all' : j.turn === 'l' && j.oncomingDir ? 'oncoming' : 'none'
+  if (mode === 'none') return Infinity
   if (jamT > JAM_TIME) return Infinity
 
   const myD = dist(self.x, self.z, j.node.x, j.node.z)
@@ -612,6 +728,20 @@ export function junctionYield(
     if (id === selfId) continue
     const od = dist(o.x, o.z, j.node.x, j.node.z)
     if (od > CONFLICT_R) continue
+
+    if (mode === 'oncoming') {
+      // Only the traffic we are cutting in front of counts. Turning left across a lane
+      // is never first-come — the car coming the other way has priority however early we
+      // arrived — so this is a time-to-arrive gate, not a distance comparison.
+      if (od <= j.node.radius) { conflict = true; break }
+      const dot = ((o.x - j.node.x) * j.oncomingDir![0] + (o.z - j.node.z) * j.oncomingDir![1]) / (od || 1)
+      if (dot < SAME_ARM_DOT) continue
+      if (Math.abs(o.speed) < 0.4) continue
+      if (od / Math.max(Math.abs(o.speed), 0.5) > 2.5) continue // far enough back to go
+      conflict = true
+      break
+    }
+
     // Anything already inside the junction box has it, full stop.
     if (od > j.node.radius) {
       // Cars queued on our own approach are carAhead's problem, not a conflict —
@@ -619,7 +749,15 @@ export function junctionYield(
       const dot = (o.x - j.node.x) * ux + (o.z - j.node.z) * uz
       if (dot / (od || 1) > SAME_ARM_DOT) continue
       if (Math.abs(o.speed) < 0.4) continue // parked on another arm blocks nobody
-      const prior = od < myD - 1 || (Math.abs(od - myD) <= 1 && id < selfId)
+      // Priority goes to whoever ARRIVES first, not whoever is nearest. Distance alone
+      // hands it to a slow car that happens to be closer, so it pulls out in front of a
+      // much faster one that reaches the junction sooner — which is precisely the
+      // remaining town collision: a left-turner at 10 km/h took the gap ahead of a car
+      // doing 42, and got T-boned mid-turn. The speed floor keeps a stopped car at the
+      // line (distance ~0, so time ~0) from being outranked by moving traffic.
+      const myT = j.dist / Math.max(Math.abs(self.speed), 2)
+      const theirT = od / Math.max(Math.abs(o.speed), 2)
+      const prior = theirT < myT - 0.3 || (Math.abs(theirT - myT) <= 0.3 && id < selfId)
       if (!prior) continue
     }
     conflict = true

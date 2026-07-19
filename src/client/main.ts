@@ -14,7 +14,8 @@ import { HUD } from './ui/hud'
 import { CopChat } from './ui/copchat'
 import { DebugPanel } from './ui/debug'
 import { GameAudio } from './audio/engine'
-import { parseMap } from '../shared/map'
+import { parseMap, TACOS_TOWN } from '../shared/map'
+import { TACOS_BOUNDS } from '../shared/tacosTown.generated'
 import { makeCarState, stepCar, copyCarState, collideCarKinematic, CarState, InputFrame } from '../shared/physics'
 import { InputShaper, RawInput } from '../shared/input'
 import { TUNING, PHYS_DT, CAR_WIDTH, CAR_LENGTH, Tuning } from '../shared/constants'
@@ -134,7 +135,10 @@ async function boot(): Promise<void> {
   const canvas = document.getElementById('game') as HTMLCanvasElement
   const pipeline = new PSXPipeline(canvas, 560)
   const scene = new THREE.Scene()
-  scene.fog = new THREE.Fog(FOG_COLOR, 18, 85)
+  // Draw distance: PS1 games hid their tiny far plane in fog, and pulling this in is the
+  // single biggest "feels like the hardware" lever. Kept mild (85 -> 66) — far enough
+  // that you still read the next corner before you have to commit to it.
+  scene.fog = new THREE.Fog(FOG_COLOR, 15, 66)
 
   const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.3, 950)
   window.addEventListener('resize', () => {
@@ -167,7 +171,11 @@ async function boot(): Promise<void> {
   const parked = map.props.filter((p) => p.kind === 'parked')
   await Promise.all(parked.map(async (p) => {
     const model = await loadCar(0, p.variant)
-    model.group.position.set(p.x, map.heightAt(p.x, p.z), p.z)
+    // town-parked cars sit up on the model's ~26 cm sidewalks
+    const onTownPath =
+      p.x > TACOS_TOWN.x + TACOS_BOUNDS.minX && p.x < TACOS_TOWN.x + TACOS_BOUNDS.maxX &&
+      p.z > TACOS_TOWN.z + TACOS_BOUNDS.minZ && p.z < TACOS_TOWN.z + TACOS_BOUNDS.maxZ
+    model.group.position.set(p.x, map.heightAt(p.x, p.z) + (onTownPath ? 0.26 : 0), p.z)
     model.group.rotation.y = p.rot
     const tint = new THREE.Color()
     world.lampTintAt(p.x, p.z, tint)
@@ -472,6 +480,9 @@ async function boot(): Promise<void> {
   let acc = 0
   let last = performance.now()
   let shapedInput: InputFrame = { seq: 0, steer: 0, throttle: 0, brake: 0, handbrake: false, headlights: true }
+  // suspension lean: eased body roll (cornering) + dive/squat (braking/accel), rad
+  let bodyRoll = 0
+  let bodyDive = 0
 
   function frame(): void {
     requestAnimationFrame(frame)
@@ -631,8 +642,21 @@ async function boot(): Promise<void> {
     const hF = map.heightAt(ix + Math.sin(iyaw) * 1.6, iz + Math.cos(iyaw) * 1.6)
     const hR = map.heightAt(ix - Math.sin(iyaw) * 1.6, iz - Math.cos(iyaw) * 1.6)
     const pitch = Math.atan2(hF - hR, 3.2)
+
+    // --- suspension: lean out of corners, dive under braking ---
+    // lateral accel ≈ v·ω; +yawRate is a right-hand turn, which drops the left
+    // side (positive rotation about the forward axis raises the car's right).
+    const rollTarget = THREE.MathUtils.clamp(car.speed * car.yawRate * 0.0045, -0.085, 0.085)
+    // aLongSmooth is the physics' own weight-transfer accel: <0 braking → nose down
+    const diveTarget = THREE.MathUtils.clamp(-car.aLongSmooth * 0.005, -0.028, 0.055)
+    const ease = THREE.MathUtils.clamp(dt * 9, 0, 1)
+    bodyRoll += (rollTarget - bodyRoll) * ease
+    bodyDive += (diveTarget - bodyDive) * ease
+
     const rightAxis = new THREE.Vector3(Math.cos(iyaw), 0, -Math.sin(iyaw))
-    const qCar = new THREE.Quaternion().setFromAxisAngle(rightAxis, -pitch)
+    const fwdAxis = new THREE.Vector3(Math.sin(iyaw), 0, Math.cos(iyaw))
+    const qCar = new THREE.Quaternion().setFromAxisAngle(fwdAxis, bodyRoll)
+    qCar.multiply(new THREE.Quaternion().setFromAxisAngle(rightAxis, -pitch + bodyDive))
     qCar.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), iyaw))
     carModel.group.position.set(ix, carH, iz)
     carModel.group.quaternion.copy(qCar)

@@ -139,11 +139,46 @@ export async function loadCar(carIdx = 0, parkedVariant = -1): Promise<CarModel>
   return buildCar(def.obj, def.tex)
 }
 
+// The pack's car_shadow textures are fully opaque rounded rects — they read as a
+// black box on the tarmac. Build a soft contact shadow instead: dark under the
+// body, penumbra fading out past the sills. Shared by every car.
+let shadowTexCache: THREE.Texture | null = null
+function contactShadowTexture(): THREE.Texture {
+  if (shadowTexCache) return shadowTexCache
+  const S = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = S
+  const ctx = canvas.getContext('2d')!
+  const img = ctx.createImageData(S, S)
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const nx = ((x + 0.5) / S) * 2 - 1 // across the car
+      const ny = ((y + 0.5) / S) * 2 - 1 // along the car
+      // superellipse: keeps the body's boxy footprint, rounds the corners
+      const d = Math.pow(Math.abs(nx), 2.4) + Math.pow(Math.abs(ny), 3.2)
+      // solid core out to the sills, then a wide soft penumbra
+      const t = Math.min(1, Math.max(0, (d - 0.18) / (1.0 - 0.18)))
+      const a = 1 - t * t * (3 - 2 * t)
+      const i = (y * S + x) * 4
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = 0
+      img.data[i + 3] = Math.round(255 * a)
+    }
+  }
+  ctx.putImageData(img, 0, 0)
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.name = 'contact-shadow'
+  // deliberately NOT psxTexture'd — nearest sampling would stairstep the penumbra
+  tex.minFilter = tex.magFilter = THREE.LinearFilter
+  tex.generateMipmaps = false
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping
+  shadowTexCache = tex
+  return tex
+}
+
 async function buildCar(objUrl: string, texUrl: string): Promise<CarModel> {
-  const [obj, tex, shadowTex] = await Promise.all([
+  const [obj, tex] = await Promise.all([
     objLoader.loadAsync(objUrl),
     loadTexture(texUrl),
-    loadTexture('/assets/cars/shadow/car_shadow_alpha.png'),
   ])
 
   const group = new THREE.Group()
@@ -167,13 +202,26 @@ async function buildCar(objUrl: string, texUrl: string): Promise<CarModel> {
   obj.position.y = -bbox.min.y * scale
   group.add(obj)
 
-  // pack's shadow blob — free grounding
+  // soft contact shadow — grounds the car without painting a hole in the road.
+  // Quad runs wider than the footprint so the penumbra has room to fade; the
+  // opaque core inside it still lines up with the body.
+  const mid = bbox.getCenter(new THREE.Vector3())
   const shadow = new THREE.Mesh(
-    new THREE.PlaneGeometry(size.x * scale * 1.15, size.z * scale * 1.05),
-    new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, opacity: 0.55, depthWrite: false, color: 0x000000 }),
+    new THREE.PlaneGeometry(size.x * scale * 1.55, size.z * scale * 1.3),
+    new THREE.MeshBasicMaterial({
+      map: contactShadowTexture(),
+      transparent: true,
+      opacity: 0.5,
+      depthWrite: false,
+      // near-black with a touch of the night's blue, so the PSX crush pass
+      // doesn't clip it to a flat 0,0,0 silhouette
+      color: 0x0a0c14,
+    }),
   )
   shadow.rotation.x = -Math.PI / 2
-  shadow.position.y = 0.02
+  // the OBJ origin isn't the footprint centre — offset so the blob sits under
+  // the car rather than trailing off the back bumper
+  shadow.position.set(mid.x * scale, 0.02, mid.z * scale)
   shadow.renderOrder = 1
   group.add(shadow)
 

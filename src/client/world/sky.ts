@@ -2,7 +2,7 @@
 // res + sparse stars + a big low moon. Horizon color == fog color so geometry
 // dissolves into the sky.
 import * as THREE from 'three'
-import { psxTexture } from '../renderer/patch'
+import { psxTexture, patchMaterial } from '../renderer/patch'
 import { hash2 } from '../../shared/map'
 
 export const FOG_COLOR = new THREE.Color('#20244a')
@@ -84,35 +84,23 @@ export function makeSky(): THREE.Group {
 
   ctx.putImageData(img, 0, 0)
 
-  // the moon: big low disc with dithered halo (visible down streets)
-  const moonX = W * 0.68, moonY = H * 0.52, moonR = 22
-  for (let y = -52; y <= 52; y++) {
-    for (let x = -52; x <= 52; x++) {
-      const d = Math.hypot(x, y)
-      const px = Math.round(moonX + x), py = Math.round(moonY + y)
-      if (px < 0 || px >= W || py < 0 || py >= H) continue
-      if (d <= moonR) {
-        // cratered disc
-        const crater = hash2(px >> 2, py >> 2, 9) < 0.24 ? 40 : 0
-        const shade = 232 - crater - d * 1.2
-        ctx.fillStyle = `rgb(${shade | 0},${shade | 0},${Math.min(255, shade + 10) | 0})`
-        ctx.fillRect(px, py, 1, 1)
-      } else if (d < 52) {
-        // dithered halo
-        const p = 1 - (d - moonR) / (52 - moonR)
-        if (hash2(px, py, 10) < p * p * 0.45) {
-          ctx.fillStyle = 'rgba(185,190,220,0.5)'
-          ctx.fillRect(px, py, 1, 1)
-        }
-      }
-    }
-  }
+  // NB: the moon used to ALSO be baked into this texture, at a different azimuth from
+  // the sprite one below — two moons in the sky whenever both were in frame. The sprite
+  // is the one that survives: it stays crisp at any internal resolution, where a baked
+  // disc gets chewed up by the dome's UV stretch near the horizon.
 
   const tex = psxTexture(new THREE.CanvasTexture(canvas))
   tex.colorSpace = THREE.SRGBColorSpace
 
-  const geo = new THREE.SphereGeometry(900, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.55)
+  // Coarse on purpose: 16x8 segments give the snap below something to bite on. A denser
+  // dome has vertices so close together that the grid rounds them all to the same place
+  // and the wobble vanishes.
+  const geo = new THREE.SphereGeometry(900, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.55)
   const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, fog: false, depthWrite: false })
+  // The dome was the one material in the game skipping the PSX patch, so the sky sat
+  // dead still while the world jittered around it. Snap on, affine off — affine swim
+  // across triangles this large would drag the whole horizon around, not shimmer it.
+  patchMaterial(mat, { affine: false, snap: true })
   const dome = new THREE.Mesh(geo, mat)
   dome.renderOrder = -10
   dome.frustumCulled = false
@@ -164,21 +152,25 @@ export function makeSky(): THREE.Group {
     sky.add(big)
   }
 
-  // sprite moon high over the fields (always in commonly-driven sightlines)
+  // The moon. Sits LOW — about 13 degrees up — because the chase cam looks slightly
+  // down at the road, so anything above ~25 deg is out of frame the entire time you're
+  // driving. Azimuth matches the directional moonlight in main.ts, so the light in the
+  // scene comes from where the moon visibly is instead of from nowhere.
   {
+    // Flat white disc, hard pixel edge, nothing else. The cratered-and-haloed version
+    // read as mush at this size — detail that small just turns to noise once the sprite
+    // is scaled down and the PSX texture filter has had its way with it.
+    const SIZE = 48
+    const R = 22 // small canvas + NearestFilter = a genuinely stair-stepped edge
     const mc = document.createElement('canvas')
-    mc.width = mc.height = 64
+    mc.width = mc.height = SIZE
     const mctx = mc.getContext('2d')!
-    for (let y = 0; y < 64; y++) {
-      for (let x = 0; x < 64; x++) {
-        const d = Math.hypot(x - 32, y - 32)
-        if (d < 26) {
-          const crater = hash2(x >> 2, y >> 2, 31) < 0.22 ? 42 : 0
-          const v = 235 - crater - d * 1.1
-          mctx.fillStyle = `rgb(${v | 0},${v | 0},${Math.min(255, v + 12) | 0})`
-          mctx.fillRect(x, y, 1, 1)
-        } else if (d < 32 && hash2(x, y, 32) < (1 - (d - 26) / 6) * 0.5) {
-          mctx.fillStyle = 'rgba(200,205,235,0.6)'
+    for (let y = 0; y < SIZE; y++) {
+      for (let x = 0; x < SIZE; x++) {
+        // +0.5 samples pixel centres, so the circle is symmetric rather than
+        // one column heavier on the top-left
+        if (Math.hypot(x - SIZE / 2 + 0.5, y - SIZE / 2 + 0.5) < R) {
+          mctx.fillStyle = '#ffffff'
           mctx.fillRect(x, y, 1, 1)
         }
       }
@@ -187,16 +179,15 @@ export function makeSky(): THREE.Group {
     moonTex.colorSpace = THREE.SRGBColorSpace
     const moonMat = new THREE.SpriteMaterial({ map: moonTex, fog: false, depthWrite: false, transparent: true })
     const moon = new THREE.Sprite(moonMat)
-    const dir = new THREE.Vector3(0.62, 0.5, 0.55).normalize()
+    // xz matches the directional light's (30, _, -40); elevation is the low bit
+    const el = 0.23 // radians above the horizon (~13 deg)
+    const dir = new THREE.Vector3(0.6 * Math.cos(el), Math.sin(el), -0.8 * Math.cos(el))
     moon.position.copy(dir.multiplyScalar(840))
-    moon.scale.setScalar(85)
+    moon.scale.setScalar(38)
     moon.renderOrder = -8
     sky.add(moon)
-    const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: moonTex, fog: false, depthWrite: false, transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending }))
-    halo.position.copy(moon.position)
-    halo.scale.setScalar(170)
-    halo.renderOrder = -9
-    sky.add(halo)
+    // No halo sprite — an additive glow around a hard-edged circle just fuzzes the edge
+    // that makes it read as pixel art in the first place.
   }
 
   // optional drop-in override: put an equirect night sky at game/public/assets/skybox.png

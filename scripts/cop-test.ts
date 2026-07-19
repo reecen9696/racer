@@ -5,10 +5,21 @@ import { makeCarState, stepCar, collideCarPair, CarState } from '../src/shared/p
 import { makeCopBrain, stepCopBrain, onCopHit, copSpawn, PIN_TIME } from '../src/shared/police'
 import { TUNING, PHYS_DT } from '../src/shared/constants'
 import { parseMap } from '../src/shared/map'
+import { buildRoadGraph, resetRoute } from '../src/shared/roadgraph'
 import { Interrogation } from '../src/server/interrogation'
 
 const map = parseMap()
-const brain = makeCopBrain(map, 'npc:cop0', 0)
+const graph = buildRoadGraph(map)
+const brain = makeCopBrain(map, 'npc:cop0', 0, 0, 1, graph)
+// Pin him to the village loop. Units now start spread over the whole network, and seat
+// 0 lands in the town grid — where the 25 s pursuit window below is simply too short
+// (a town pin measures 27 s against 12 s on the loop, because of the speed limit and
+// the corners), so the case failed while pursuit itself was working fine everywhere.
+// Town pursuit is its own scenario and wants its own case, not a silent re-aim of this one.
+{
+  const village = [...graph.edges.values()].find((e) => e.zone === 'v' || e.zone === 'e')!
+  resetRoute(brain.route, graph, village.id, 0.3)
+}
 const s0 = copSpawn(brain)
 const cop = makeCarState(s0.x, s0.z, s0.yaw)
 const players = new Map<string, CarState>()

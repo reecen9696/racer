@@ -3,7 +3,8 @@
 // translates by the town anchor. Colliders are 2D AABBs for shared physics.
 import { readFileSync, writeFileSync } from 'node:fs'
 
-interface MeshRow { name: string; mat: string; min: number[]; max: number[] }
+interface Box { minX: number; minZ: number; maxX: number; maxZ: number }
+interface MeshRow { name: string; mat: string; min: number[]; max: number[]; walls?: Box[] }
 const data = JSON.parse(readFileSync('scripts/tacos-meshes.json', 'utf8')) as {
   total: { min: number[]; max: number[] }
   meshes: MeshRow[]
@@ -26,13 +27,27 @@ const onAsphalt = (x: number, z: number) =>
 const SOLID_PREFIX = /^(buildings|OXXO|Fence|brick|doors_|gas_tank|Public_phone|trash_can|Refrigerator|Board|Taco_stand)/
 const POLE_PREFIX = /^(electric_pole|Parking_M)/
 
+// anything a car simply rides over: kerbs, painted markers, wheel stops
+const RIDE_OVER_H = 0.6
+
 const colliders: Array<{ minX: number; minZ: number; maxX: number; maxZ: number }> = []
+const paved: Box[] = [] // forecourts/slabs: tarmac grip, and nothing scatters onto them
 const skipped: string[] = []
 for (const m of data.meshes) {
   if (HIDDEN.includes(m.name)) continue
   const [minX, minY, minZ] = m.min
   const [maxX, maxY, maxZ] = m.max
   const w = maxX - minX, h = maxY - minY, d = maxZ - minZ
+
+  // dumped wall boxes (mesh merges a building with ground it doesn't occupy —
+  // OXXO's AABB otherwise walls off its whole parking lot). The AABB is still
+  // useful as the paved footprint: it's the building plus its own slab.
+  if (m.walls) {
+    colliders.push(...m.walls)
+    paved.push({ minX, minZ, maxX, maxZ })
+    continue
+  }
+  if (maxY < RIDE_OVER_H) { skipped.push(`${m.name} (ride-over, ${maxY.toFixed(1)}m tall)`); continue }
 
   if (/^Tree/.test(m.name)) {
     // trunk-sized box like the game's trees
@@ -86,6 +101,10 @@ export const TACOS_NS_BANDS: Array<[number, number]> = ${JSON.stringify(NS_BANDS
 export const TACOS_EW_BANDS: Array<[number, number]> = ${JSON.stringify(EW_BANDS)}
 export const TACOS_ROAD_X: [number, number] = ${JSON.stringify(ROAD_X)}
 export const TACOS_ROAD_Z: [number, number] = ${JSON.stringify(ROAD_Z)}
+
+// paved lots (a shell mesh's own slab): drivable tarmac, and off-limits to the
+// tree scatter — without this, trees sprout across the OXXO forecourt
+export const TACOS_PAVED: TacosBox[] = ${JSON.stringify(paved)}
 
 // meshes hidden client-side to open the west entry (their colliders are dropped too)
 export const TACOS_HIDDEN: string[] = ${JSON.stringify(HIDDEN)}

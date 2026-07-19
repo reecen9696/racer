@@ -128,7 +128,11 @@ export function carAhead(
 export function followSpeed(self: CarState, ob: Obstacle): number {
   const want = 7 + Math.abs(self.speed) * 0.9
   if (ob.gap >= want) return Infinity
-  if (ob.gap < 2.5) return 0
+  // Stop with 3.5 m of bumper clearance, not 2.5. speedControl deliberately stops
+  // braking below 1 m/s (braking past standstill is reverse in this physics), so the
+  // last metre of an approach is always a coast — at 2.5 m that coast ended in a 0.1 m/s
+  // touch whenever a queue formed at a give-way line. A metre of margin absorbs it.
+  if (ob.gap < 3.5) return 0
   const t = clamp(ob.gap / want, 0, 1)
   return Math.max(0, ob.theirSpeed) * t + t * t * 2
 }

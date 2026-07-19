@@ -23,7 +23,7 @@ import {
 } from './driving'
 import {
   RoadGraph, Route, buildRoadGraph, seatRoute, resetRoute, extendRoute, trimRoute,
-  nearestOnGraph, routeSpawn, junctionAhead, junctionYield,
+  nearestOnGraph, routeSpawn, junctionAhead, junctionYield, currentZone,
 } from './roadgraph'
 
 export interface TrafficBrain {
@@ -60,6 +60,12 @@ export const TRAFFIC_COUNT = 14
 // but it turns the village policeman into a man stuck in traffic. Varied per driver so
 // they don't lock into a convoy holding a fixed gap forever.
 const CRUISE = [12.2, 11.6, 12.6, 11.9]
+// Town speed limit. The grid puts a junction every 70 m, and civilians taking those at
+// the open-road cruise arrive with less time to read the crossing than the give-way
+// logic needs — the one collision left after the lane fix was a car doing 42 km/h
+// through a town crossing. It also simply looks wrong: nobody drives a village high
+// street at the speed they drive the bypass.
+const TOWN_CRUISE = 8 // m/s ≈ 29 km/h
 const HONK_COOLDOWN = 3.5 // s — a warning, not a tantrum
 const UNWEDGE_TIME = 10 // s of no displacement before we lift the car back onto the ring
 // Digging out of a field. Full lock plus full throttle is what a naive controller asks
@@ -171,8 +177,24 @@ export function stepTrafficBrain(
   // --- who's in the way ---
   const ob = carAhead(self, others, 26, { path: route.path, from: route.wpIndex })
   const yieldTo = ob ? followSpeed(self, ob) : Infinity
-  const blocked = yieldTo < brain.cruise - 0.5
+  const blocked = yieldTo < brain.cruise - 0.5 // free-flow cruise: a town limit isn't 'blocked'
   brain.blockedT = blocked ? brain.blockedT + dt : 0
+
+  // --- give way at the junction ahead ---
+  // Computed HERE, above the watchdogs, and not down with the rest of the driving, for
+  // the same reason the cop hoists his lane check: a car stopped at a give-way line has
+  // nothing in its lane, so `blocked` is false, and every stuck-detector below then reads
+  // a correctly-waiting car as a broken one. It reversed into the junction after 1.6 s
+  // and got teleported out of it after 10 — which is how a car ended up stationary and
+  // sideways in the middle of town for the rest of the run, and every collision in the
+  // first town test was somebody else arriving at 30 km/h and hitting it.
+  // Waiting your turn is not being stuck.
+  const jn = junctionAhead(route, brain.graph, self.x, self.z)
+  const junctionCap = jn ? junctionYield(jn, brain.id, self, others, brain.jamT) : Infinity
+  const waiting = junctionCap < 0.5
+  if (waiting && Math.abs(self.speed) < 1) brain.jamT += dt
+  else if (junctionCap === Infinity) brain.jamT = 0
+  const holding = blocked || waiting
 
   // Honk when a PLAYER is the thing we're braking for and it's a real intervention —
   // either we're closing on them fast or they've parked in the lane and we've come to
@@ -199,7 +221,7 @@ export function stepTrafficBrain(
   // `!blocked` matters: a car stopped with a wheel on the verge because it is correctly
   // yielding to someone is not stranded, and treating it as such hands the wheel to a
   // recovery routine that ignores the very car it was stopping for.
-  const stranded = wheelsOff === 4 || (wheelsOff > 0 && !blocked && Math.abs(self.speed) < 2)
+  const stranded = wheelsOff === 4 || (wheelsOff > 0 && !holding && Math.abs(self.speed) < 2)
   brain.offroadT = stranded ? brain.offroadT + dt : 0
   if (stranded) {
     let nearestPlayer = Infinity
@@ -214,8 +236,9 @@ export function stepTrafficBrain(
   // --- wedge watchdog ---
   // Displacement-based, exactly like the cop's: the waypoint index is worthless here
   // because a car spun against a wall still chews through waypoints. Sitting in a queue
-  // is not a wedge, so the timer only runs when nothing is blocking us.
-  if (blocked) {
+  // is not a wedge, and nor is waiting your turn at a junction, so the timer only runs
+  // when nothing at all is legitimately holding us.
+  if (holding) {
     brain.wedgeT = 0
     brain.lastX = self.x
     brain.lastZ = self.z
@@ -289,7 +312,7 @@ export function stepTrafficBrain(
     input.steer = (brain.stuckTries % 2 === 0 ? -1 : 1) * Math.abs(steerToward(self, wp0.x, wp0.z)) || 0.6
     return { input, honk }
   }
-  if (!blocked && Math.abs(self.speed) < 0.7) {
+  if (!holding && Math.abs(self.speed) < 0.7) {
     brain.stuckT += dt
     if (brain.stuckT > 1.6) {
       brain.reverseT = 1.8
@@ -329,16 +352,9 @@ export function stepTrafficBrain(
     prevH = h
   }
 
-  // --- give way at the junction ahead ---
-  // Only ever bites on the terminating arm of a T or at an all-way in town, and only
-  // when something is actually coming — a driver on the through road carries on as
-  // before. jamT is the stand-off breaker; see junctionYield.
-  const jn = junctionAhead(route, brain.graph, self.x, self.z)
-  const junctionCap = jn ? junctionYield(jn, brain.id, self, others, brain.jamT) : Infinity
-  if (junctionCap < 0.5 && Math.abs(self.speed) < 1) brain.jamT += dt
-  else if (junctionCap === Infinity) brain.jamT = 0
-
-  const target = Math.min(brain.cruise * clamp(1 - curve * 0.3, 0.42, 1), yieldTo, junctionCap)
+  const zone = currentZone(route, brain.graph)
+  const cruise = zone === 'town' ? Math.min(brain.cruise, TOWN_CRUISE) : brain.cruise
+  const target = Math.min(cruise * clamp(1 - curve * 0.3, 0.42, 1), yieldTo, junctionCap)
 
   const aim = pointAhead(route.path, route.wpIndex, self, clamp(5 + Math.abs(self.speed) * 0.85, 6, 20))
   input.steer = steerToward(self, aim.x, aim.z)
@@ -350,7 +366,7 @@ export function stepTrafficBrain(
   // of a corner at 5 m/s has a small error, and 25% throttle will not pull it up the
   // village's hills: they averaged 27 km/h against a 38 km/h cruise and crawled some
   // climbs at 9. More authority only while genuinely under target — not more speed.
-  if (!blocked && target - self.speed > 0.5) input.throttle = clamp((target - self.speed) / 3, 0.4, 1)
+  if (!holding && target - self.speed > 0.5) input.throttle = clamp((target - self.speed) / 3, 0.4, 1)
   // Stopped behind something: no throttle at all. speedControl's 0.15 "coast" term is
   // meant to stop a car creeping over its target, but at a target of zero it still
   // dribbles forward at ~0.1 m/s — invisible per frame, and enough to close a two metre

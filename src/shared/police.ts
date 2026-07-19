@@ -9,7 +9,7 @@ import {
 } from './driving'
 import {
   RoadGraph, Route, buildRoadGraph, seatRoute, resetRoute, extendRoute, trimRoute,
-  nearestOnGraph, routeSpawn, junctionAhead, junctionYield,
+  nearestOnGraph, routeSpawn, junctionAhead, junctionYield, currentZone,
 } from './roadgraph'
 
 export type CopMode = 'patrol' | 'pursuit' | 'interrogate' | 'cooldown'
@@ -64,6 +64,7 @@ export const COP_COUNT = 3 // three units on the night shift, one officer each
 export const ASSIST_RANGE = 130 // m — a responder switches from driving to hunting
 
 const PATROL_SPEED = 15 // m/s ≈ 54 km/h — still above the civilians' ~12
+const TOWN_PATROL_SPEED = 9.5 // m/s ≈ 34 km/h — a shade over the civilians' town pace
 const RESPOND_SPEED = 27 // m/s ≈ 97 km/h — blues-and-twos along the ring, not yet hunting
 const PURSUIT_SPEED = 50 // just under player maxSpeed (52); rubber band does the rest
 // The lane geometry that used to live here — sampling dirtCenterlinePoint and pushing
@@ -171,6 +172,20 @@ export function stepCopBrain(
   const laneSpeed = laneAhead ? followSpeed(cop, laneAhead) : Infinity
   const yielding = laneSpeed < PATROL_SPEED - 0.5
 
+  // --- give way at the junction ahead ---
+  // Up here with the lane check, and for the same reason: a unit stopped at a give-way
+  // line has nothing in his lane, so without this the watchdogs below read a correctly
+  // waiting car as a wedged one and reverse him into the junction he was waiting at.
+  // NOT while responding to a call — blues-and-twos is exactly the exemption it looks
+  // like, and a responder that stops dead at every junction never arrives.
+  const jn = onPatrol && !brain.assistId ? junctionAhead(route, brain.graph, cop.x, cop.z) : null
+  const junctionCap = jn
+    ? junctionYield(jn, brain.id, cop, traffic?.size ? new Map([...players, ...traffic]) : players, brain.jamT)
+    : Infinity
+  const waiting = junctionCap < 0.5
+  if (waiting && Math.abs(cop.speed) < 1) brain.jamT += dt
+  else if (junctionCap === Infinity) brain.jamT = 0
+
   // --- wedge watchdog ---
   // Measured on REAL DISPLACEMENT, not the waypoint index. The index is worthless
   // here: `reached()` also accepts a waypoint that's merely *behind* him, so a cop
@@ -189,7 +204,7 @@ export function stepCopBrain(
   const tgt = brain.mode === 'pursuit' ? players.get(brain.targetId) : undefined
   // `yielding` counts as holding: waiting behind stopped traffic is the correct thing
   // to be doing, and letting the watchdog run there teleports him out of a queue.
-  const holding = yielding || brain.pinT > 0 || (!!tgt && nearest < PIN_DIST + 4 && Math.abs(tgt.speed) < TARGET_STOP_V)
+  const holding = yielding || waiting || brain.pinT > 0 || (!!tgt && nearest < PIN_DIST + 4 && Math.abs(tgt.speed) < TARGET_STOP_V)
   if (holding) {
     brain.wedgeT = 0
     brain.lastX = cop.x
@@ -380,19 +395,11 @@ export function stepCopBrain(
   // Responding to a call he drives the same ring, considerably faster. Still capped by
   // `laneSpeed`: arriving at a shout is no excuse for going through the back of a
   // civilian, and a pile-up in the village is how a responder becomes the incident.
-  const cruise = brain.assistId ? RESPOND_SPEED : PATROL_SPEED
-
-  // --- give way at the junction ahead ---
-  // He obeys the same priority rules as everyone else while patrolling: stops on the
-  // terminating arm of a T when something is coming, and at town crossings. NOT while
-  // responding to a call — blues-and-twos is exactly the exemption it looks like, and a
-  // responder that stops dead at every junction never arrives.
-  const jn = brain.assistId ? null : junctionAhead(route, brain.graph, cop.x, cop.z)
-  const junctionCap = jn
-    ? junctionYield(jn, brain.id, cop, traffic?.size ? new Map([...players, ...traffic]) : players, brain.jamT)
-    : Infinity
-  if (junctionCap < 0.5 && Math.abs(cop.speed) < 1) brain.jamT += dt
-  else if (junctionCap === Infinity) brain.jamT = 0
+  // Same town limit the civilians keep, for the same reasons — except when he's
+  // responding to a shout, which is the one time a police car is entitled to press on.
+  const zone = currentZone(route, brain.graph)
+  const cruise = brain.assistId ? RESPOND_SPEED
+    : zone === 'town' ? Math.min(PATROL_SPEED, TOWN_PATROL_SPEED) : PATROL_SPEED
 
   const targetSpeed = Math.min(cruise * clamp(1 - curve * 0.3, 0.42, 1), laneSpeed, junctionCap)
 

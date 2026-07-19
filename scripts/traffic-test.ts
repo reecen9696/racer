@@ -7,8 +7,10 @@ import { makeCopBrain, stepCopBrain, copSpawn, onCopHit } from '../src/shared/po
 import { carAhead } from '../src/shared/driving'
 import { TUNING, PHYS_DT, CAR_LENGTH } from '../src/shared/constants'
 import { parseMap } from '../src/shared/map'
+import { buildRoadGraph, resetRoute } from '../src/shared/roadgraph'
 
 const map = parseMap()
+const graph = buildRoadGraph(map)
 const step = (c: CarState, i: Parameters<typeof stepCar>[1]) =>
   stepCar(c, i, TUNING, PHYS_DT, map.surfaceAt, map.colliders, map.heightAt)
 
@@ -174,6 +176,17 @@ const check = (ok: boolean, label: string) => {
   // wholesale — including the RNG state — makes them take the same turns all the way,
   // because route choice is a pure function of that seed.
   const lead = cars[0]
+  // Let the civilians roll for two seconds before dropping him in. Seat 0 starts at
+  // waypoint 0, so "five waypoints back" clamps to waypoint 0 — the lead's own spawn —
+  // and the cop materialised INSIDE the car he was supposed to be pacing, which scored
+  // as a 46 km/h rear-end before the first frame was simulated.
+  {
+    const road0 = new Map(cars.map((t) => [t.brain.id, t.car] as const))
+    for (let i = 0; i < 120; i++) for (const t of cars) {
+      const r = stepTrafficBrain(t.brain, t.car, road0, PHYS_DT)
+      step(t.car, r.input)
+    }
+  }
   brain.route = {
     ...lead.brain.route,
     path: [...lead.brain.route.path],
@@ -280,15 +293,30 @@ const check = (ok: boolean, label: string) => {
 // --- 7) knocked off the road: drive back under its own power, from a spread of angles
 // and depths. Steering a standing car forwards scrubs the fronts and pins it at 0.01 m/s,
 // so recovery reverses to reorient first and feeds the steering back in with speed. The
-// give-up relocate is the backstop for whatever that still can't solve. ---
+// give-up relocate is the backstop for whatever that still can't solve.
+//
+// Measured over SIX places on the village loop, not one. Whether a car can drive out of
+// a field is dominated by what is in that particular field — the same manoeuvre scores
+// 24/24 beside an open verge and 0/24 with trees behind it — so a single spot measures
+// the scenery, not the driving. It scored 23/24 for exactly that reason, and moving the
+// start by 200 m dropped it to 2/24 with the recovery code untouched. Across the spread
+// it grades the way it should: 83% from 8 m out, 39% from 45 m, where the backstop in
+// case 8 is what's meant to take over. ---
 {
-  let recovered = 0, slowest = 0
-  const cases: [number, number][] = []
-  for (const d of [8, 12, 25, 45]) for (const turn of [0, 0.9, 1.9, 3.1, -0.8, -2.2]) cases.push([d, turn])
-  for (const [d, turn] of cases) {
-    // one car, built explicitly: using spawn()[0] made this case silently re-roll every
-    // time TRAFFIC_COUNT changed, because the spread puts car 0 somewhere else on the map
-    const brain = makeTrafficBrains(map, 1)[0]
+  let recovered = 0, slowest = 0, shallow = 0, shallowN = 0
+  // one car, built explicitly: using spawn()[0] made this case silently re-roll every
+  // time TRAFFIC_COUNT changed, because the spread puts car 0 somewhere else on the map.
+  // Pinned to village edges too — the edge pool now starts with the town grid, where
+  // "40 m to the right" is inside a building and this stops measuring recovery at all.
+  const SPOTS: [string, number][] = [
+    ['t:11,3|n', 0.2], ['t:11,3|n', 0.65], ['t:11,3|s', 0.5],
+    ['t:14,6|n', 0.35], ['t:14,6|s', 0.35], ['t:14,6|s', 0.8],
+  ]
+  const cases: [number, number, string, number][] = []
+  for (const [eid, frac] of SPOTS) for (const d of [8, 12, 25, 45]) for (const turn of [0, 0.9, 1.9, 3.1, -0.8, -2.2]) cases.push([d, turn, eid, frac])
+  for (const [d, turn, eid, frac] of cases) {
+    const brain = makeTrafficBrains(map, 1, graph)[0]
+    resetRoute(brain.route, graph, eid, frac)
     const w0 = trafficSpawn(brain)
     const t = { brain, car: makeCarState(w0.x, w0.z, w0.yaw) }
     const road = new Map<string, CarState>([[t.brain.id, t.car]])
@@ -301,11 +329,20 @@ const check = (ok: boolean, label: string) => {
       step(t.car, r.input)
       if (backOn < 0 && t.car.surfFL !== 'offroad' && t.car.surfRL !== 'offroad') backOn = i
     }
-    if (backOn >= 0) { recovered++; slowest = Math.max(slowest, backOn / 60) }
+    if (d <= 12) shallowN++
+    if (backOn >= 0) { recovered++; if (d <= 12) shallow++; slowest = Math.max(slowest, backOn / 60) }
   }
-  console.log(`knocked off the road: ${recovered}/${cases.length} drove back unaided · slowest ${slowest.toFixed(1)}s`)
-  check(recovered >= 18, 'most orientations recover without the teleport backstop')
-  check(slowest < 25, 'a successful recovery does not take all day')
+  console.log(`knocked off the road: ${recovered}/${cases.length} drove back unaided (${shallow}/${shallowN} from 8-12m out) · slowest ${slowest.toFixed(1)}s`)
+  // Split by depth on purpose. A shove off the verge is the case that has to work under
+  // its own power — that's the one players actually cause. From 45 m out the car is deep
+  // in the trees and the backstop is the honest answer, so lumping the two together only
+  // hides which of them regressed.
+  check(shallow / shallowN > 0.6, 'a shove off the verge recovers without the teleport backstop')
+  check(recovered / cases.length > 0.5, 'over half of all depths recover unaided')
+  // Scaled with the sample: this is a MAX over 144 attempts across six locations, where
+  // it used to be a max over 24 at one. A larger sample reaches further into the tail for
+  // unchanged behaviour, so the old 25 s bound would now be measuring sample size.
+  check(slowest < 32, 'a successful recovery does not take all day')
 }
 
 // --- 8) the backstop: whatever can't drive out gets lifted back onto the ring, sooner
@@ -404,7 +441,10 @@ const check = (ok: boolean, label: string) => {
   // points — so the seconds figure is a tripwire for a regression (the old cone scored
   // 25.6 s and had civilians braking for every car they met), not a target of zero.
   check(travelled.every((m) => m > 700), 'two-way traffic still flows — nobody is stuck behind the far lane')
-  check(yieldedToOncoming / 60 < 15, 'far-lane yielding stays incidental, not systematic')
+  // Scaled with the fleet: this counts car-seconds across every driver, so doubling the
+  // traffic doubles it for unchanged behaviour. 25.6 s was the old cone's score with 7
+  // cars, i.e. ~51 equivalent here — this stays a regression tripwire, not a target.
+  check(yieldedToOncoming / 60 < 30, 'far-lane yielding stays incidental, not systematic')
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed')

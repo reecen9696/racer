@@ -174,7 +174,12 @@ export function stepCar(
   let brakeForce = 0
   if (input.brake > 0) {
     if (vLong > 0.5) brakeForce = -input.brake * T.brakeForce
-    else brakeForce = -input.brake * T.reverseForce * clamp(1 + vLong / 20, 0, 1) // reverse, tapering to a ~72 km/h gear cap
+    else {
+      // reverse mirrors forward drive: same gear scaling and same cubic governor
+      // against maxSpeed, so backing up pulls away as hard as accelerating
+      const vRevN = -vLong / T.maxSpeed
+      brakeForce = -input.brake * T.reverseForce * gearScale * clamp(1 - vRevN * vRevN * vRevN, 0, 1) * 1.05
+    }
   }
 
   // --- rear traction budget (friction circle): drive torque beyond what the loaded
