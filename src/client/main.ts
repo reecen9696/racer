@@ -20,7 +20,7 @@ import { InputShaper, RawInput } from '../shared/input'
 import { TUNING, PHYS_DT, CAR_WIDTH, CAR_LENGTH } from '../shared/constants'
 import { makeScore, stepScore } from '../shared/scoring'
 import { NetClient, RemotePlayer } from './net/net'
-import { CARS, DEFAULT_CAR, carTuning } from '../shared/cars'
+import { CARS, DEFAULT_CAR, PLAYABLE, WRECK_CAR, carTuning } from '../shared/cars'
 import { PIN_TIME } from '../shared/police'
 
 // ---------- join screen ----------
@@ -35,7 +35,7 @@ function showJoin(): Promise<void> {
     el.innerHTML = `
       <div class="spacer"></div>
       <div class="row"><span>NAME</span><input id="name" maxlength="16" placeholder="driver" /></div>
-      <div class="cars">${CARS.map((c, i) => `<button data-i="${i}" class="${i === DEFAULT_CAR ? 'sel' : ''}"><i style="background:${c.swatch}"></i>${c.label}</button>`).join('')}</div>
+      <div class="cars">${PLAYABLE.map((i) => { const c = CARS[i]; return `<button data-i="${i}" class="${i === DEFAULT_CAR ? 'sel' : ''}"><i style="background:${c.swatch}"></i>${c.label}</button>` }).join('')}</div>
       <button id="start">DRIVE</button>
       <div class="status" id="join-status"></div>
     `
@@ -104,6 +104,19 @@ async function boot(): Promise<void> {
     scene.add(model.group)
   }
 
+  // the retired coupe, dumped in the clearing off the dirt road. Same loader as a
+  // playable car (it IS one of the CARS entries, just flagged wreck) but canted on
+  // its springs so it reads as abandoned rather than parked up.
+  for (const p of map.props.filter((p) => p.kind === 'wreck')) {
+    const model = await loadCar(WRECK_CAR)
+    model.group.position.set(p.x, map.heightAt(p.x, p.z), p.z)
+    model.group.rotation.set(0.06, p.rot, 0.09)
+    const tint = new THREE.Color()
+    world.lampTintAt(p.x, p.z, tint)
+    for (const m of model.tintables) m.color.copy(tint).multiplyScalar(0.72) // sun-bleached, no headlights on it
+    scene.add(model.group)
+  }
+
   // ---------- player car ----------
   const carModel: CarModel = await loadCar(chosenCar)
   scene.add(carModel.group)
@@ -154,7 +167,8 @@ async function boot(): Promise<void> {
 
   // remote car visuals, created lazily as players appear (the cop is just a remote
   // with bot === 1 — same interpolation path, different model + a light bar)
-  interface RemoteVis { model: CarModel; rig: HeadlightRig; tag: HTMLElement; bar?: LightBar }
+  // tag is only built for human players — the cop and civilian traffic stay anonymous
+  interface RemoteVis { model: CarModel; rig: HeadlightRig; tag?: HTMLElement; bar?: LightBar }
   const remoteVis = new Map<string, RemoteVis>()
   const pending = new Set<string>()
   const tagLayer = document.createElement('div')
@@ -170,12 +184,14 @@ async function boot(): Promise<void> {
       const rig = new HeadlightRig(CAR_WIDTH, CAR_LENGTH)
       scene.add(model.group)
       scene.add(rig.group)
-      const tag = document.createElement('div')
-      tag.style.position = 'absolute'
-      tag.textContent = r.name
-      if (isCop) tag.style.color = '#8fb4ff'
-      tagLayer.appendChild(tag)
-      const v: RemoteVis = { model, rig, tag }
+      const v: RemoteVis = { model, rig }
+      if (!r.bot) {
+        const tag = document.createElement('div')
+        tag.style.position = 'absolute'
+        tag.textContent = r.name
+        tagLayer.appendChild(tag)
+        v.tag = tag
+      }
       if (isCop) {
         v.bar = new LightBar(CAR_LENGTH)
         scene.add(v.bar.group)
@@ -298,10 +314,9 @@ async function boot(): Promise<void> {
       slip: +car.slipAngle.toFixed(3),
       cones: conePhys.downed(),
       draws: pipeline.renderer.info.render.calls, tris: pipeline.renderer.info.render.triangles,
-      cop: (() => {
-        const c = [...net.remotes.values()].find((r) => r.bot === 1)
-        return c ? { x: +c.x.toFixed(1), z: +c.z.toFixed(1), mode: c.copMode, pinT: +c.pinT.toFixed(2), target: c.copTarget === net.myId ? 'me' : c.copTarget } : null
-      })(),
+      cops: [...net.remotes.values()]
+        .filter((r) => r.bot === 1)
+        .map((c) => ({ id: c.id, x: +c.x.toFixed(1), z: +c.z.toFixed(1), mode: c.copMode, pinT: +c.pinT.toFixed(2), target: c.copTarget === net.myId ? 'me' : c.copTarget })),
       frozen,
     })
   }, 500)
@@ -579,8 +594,8 @@ async function boot(): Promise<void> {
     audio.update(car, shapedInput.throttle, score.drifting, dt)
 
     // ---------- multiplayer: reconcile local car, interpolate remotes ----------
-    let copDist = Infinity
-    let copActive = false
+    let copDist = Infinity // nearest patrol car, chasing or not
+    let chaseDist = Infinity // nearest one actually in pursuit — what the siren follows
     let ringVisible = false
     if (net.connected) {
       net.reconcile(car)
@@ -607,9 +622,13 @@ async function boot(): Promise<void> {
           v.bar.update(r.copMode >= 1, dt)
           v.bar.group.position.set(r.x, rh, r.z)
           v.bar.group.rotation.y = r.yaw
-          copDist = Math.hypot(r.x - ix, r.z - iz)
-          copActive = r.copMode === 1 // pursuit only — the siren goes off at the stop
-          // pin bar — your HUD, so it only shows while HE has hold of YOU
+          // three units now: the siren follows the NEAREST one actually chasing, so a
+          // patrol car parked beside you can't drown out the pursuit behind you, and
+          // one unit reaching a stop doesn't silence the other two.
+          const d = Math.hypot(r.x - ix, r.z - iz)
+          if (r.copMode === 1) chaseDist = Math.min(chaseDist, d) // pursuit only — siren off at the stop
+          copDist = Math.min(copDist, d)
+          // pin bar — your HUD, so it only shows while one of them has hold of YOU
           if (r.pinT > 0 && r.copTarget === net.myId) {
             pinRing.style.display = 'block'
             pinFill.style.width = Math.min(100, (r.pinT / PIN_TIME) * 100) + '%'
@@ -618,13 +637,15 @@ async function boot(): Promise<void> {
           }
         }
         // name tag above the car
-        const sp = new THREE.Vector3(r.x, map.heightAt(r.x, r.z) + 2.2, r.z).project(camera)
-        if (sp.z < 1) {
-          v.tag.style.display = 'block'
-          v.tag.style.left = ((sp.x * 0.5 + 0.5) * window.innerWidth - 20) + 'px'
-          v.tag.style.top = ((-sp.y * 0.5 + 0.5) * window.innerHeight) + 'px'
-        } else {
-          v.tag.style.display = 'none'
+        if (v.tag) {
+          const sp = new THREE.Vector3(r.x, map.heightAt(r.x, r.z) + 2.2, r.z).project(camera)
+          if (sp.z < 1) {
+            v.tag.style.display = 'block'
+            v.tag.style.left = ((sp.x * 0.5 + 0.5) * window.innerWidth - 20) + 'px'
+            v.tag.style.top = ((-sp.y * 0.5 + 0.5) * window.innerHeight) + 'px'
+          } else {
+            v.tag.style.display = 'none'
+          }
         }
       }
       for (const [id, v] of remoteVis) {
@@ -632,13 +653,13 @@ async function boot(): Promise<void> {
           scene.remove(v.model.group)
           scene.remove(v.rig.group)
           if (v.bar) scene.remove(v.bar.group)
-          v.tag.remove()
+          v.tag?.remove()
           remoteVis.delete(id)
         }
       }
     }
     if (!ringVisible) pinRing.style.display = 'none'
-    audio.updateSiren(copActive, copDist)
+    audio.updateSiren(chaseDist < Infinity, Math.min(chaseDist, copDist))
     copChat.tick()
 
     pipeline.render(scene, camera)

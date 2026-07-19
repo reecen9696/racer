@@ -4,7 +4,7 @@
 // w=forest, h=highway (wider Highway_* pieces; branches off the loop, never part of it).
 // Everything (visuals, lamps, props, collision, surfaces) derives from this one grid,
 // so the server never loads a model.
-import { TILE } from './constants'
+import { TILE, CAR_LENGTH, CAR_WIDTH } from './constants'
 import { AABB, SurfaceSampler } from './physics'
 import {
   TACOS_BOUNDS, TACOS_NS_BANDS, TACOS_EW_BANDS, TACOS_ROAD_X, TACOS_ROAD_Z,
@@ -420,6 +420,9 @@ export function parseMap(): ParsedMap {
   // library — the reason the treeline read as the same handful of green blobs.
   // Draw from a multiple of 16 so every model comes up equally often.
   const TREE_VARIANTS = 48
+  // how many parked-car liveries the client can draw (world/assets.ts PARKED_VARIANTS).
+  // The client mods by its real pool size, so this only has to be >= it to use them all.
+  const PARKED_VARIANTS = 14
 
   // The dirt run is one contiguous stretch of the loop, so a normalised position
   // along it drives scenery variety end to end. One deliberate open stretch breaks
@@ -549,7 +552,7 @@ export function parseMap(): ParsedMap {
           if (hash2(t.gx, t.gz, side + 20) < 0.3) {
             const px = along === 'ns' ? t.x + side * (CURB_HALF + 1.6) : hx + 3
             const pz = along === 'ns' ? hz + 3 : t.z + side * (CURB_HALF + 1.6)
-            props.push({ kind: 'parked', x: px, z: pz, rot: along === 'ns' ? 0 : Math.PI / 2, variant: Math.floor(hash2(t.gx, t.gz, 6) * 4) })
+            props.push({ kind: 'parked', x: px, z: pz, rot: along === 'ns' ? 0 : Math.PI / 2, variant: Math.floor(hash2(t.gx, t.gz, 6) * PARKED_VARIANTS) })
             colliders.push(box(px, pz, along === 'ns' ? 1.0 : 2.3, along === 'ns' ? 2.3 : 1.0))
           }
         }
@@ -868,6 +871,108 @@ export function parseMap(): ParsedMap {
           if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
         }
       }
+    }
+  }
+
+  // --- cars parked along the verge. The village already puts one outside the odd
+  // house; this fills the rest of the loop so the roads read as lived-on rather than
+  // as a circuit that empties between junctions.
+  //
+  // Placed off the centreline and probed against the actual surface rather than
+  // trusted to a fixed offset, because the paved width varies by zone — a constant
+  // lateral would put these in the hedges on the narrow lanes and out in the field on
+  // the wide ones. Straights only: a car parked on a corner apex is exactly where
+  // someone is mid-drift.
+  for (const t of order) {
+    if (t.piece !== 'straight') continue
+    if (t.dirt || t.zone === 'h') continue // not the drift playground, not the highway
+    for (const side of [-1, 1]) {
+      if (hash2(t.gx, t.gz, side + 730) > 0.24) continue // ~1 straight in 4, per side
+      const u = 0.25 + hash2(t.gx, t.gz, side + 731) * 0.5 // keep clear of the tile seams
+      const [px, pz] = dirtCenterlinePoint(t, u)
+      const [ax, az] = dirtCenterlinePoint(t, Math.min(1, u + 0.02))
+      const [bx, bz] = dirtCenterlinePoint(t, Math.max(0, u - 0.02))
+      const tlen = Math.hypot(ax - bx, az - bz) || 1
+      const tanX = (ax - bx) / tlen, tanZ = (az - bz) / tlen
+      const nx = -tanZ, nz = tanX
+      // walk out from the centreline until the surface stops being drivable, then sit
+      // just beyond it — this is what adapts to each zone's width automatically
+      let lat = 0
+      for (let d = 5; d <= 13; d += 0.5) {
+        if (surfaceAt(px + nx * side * d, pz + nz * side * d) === 'offroad') { lat = d + 1.4; break }
+      }
+      if (lat === 0) continue // never found an edge (junction mouth, plaza) — skip it
+      const x = px + nx * side * lat, z = pz + nz * side * lat
+      // the whole footprint must be off the road, not just the centre point
+      if (!clearOfRoadBy(x, z, 2.4) || inTacosTown(x, z, 10)) continue
+      let blocked = false
+      for (const p of props) {
+        if (p.kind !== 'parked' && p.kind !== 'house' && p.kind !== 'wreck' && p.kind !== 'tree_big') continue
+        if ((p.x - x) ** 2 + (p.z - z) ** 2 < 7 * 7) { blocked = true; break }
+      }
+      if (blocked) continue
+      // nose along the road, ±8° of slop so the row doesn't look surveyed in
+      const rot = Math.atan2(tanX, tanZ) + (hash2(t.gx, t.gz, side + 733) - 0.5) * 0.28
+      props.push({ kind: 'parked', x, z, rot, variant: Math.floor(hash2(t.gx, t.gz, side + 734) * PARKED_VARIANTS) })
+      const sr = Math.abs(Math.sin(rot)), cr = Math.abs(Math.cos(rot))
+      const hl = CAR_LENGTH / 2, hw = CAR_WIDTH / 2
+      colliders.push(box(x, z, hl * sr + hw * cr, hl * cr + hw * sr))
+    }
+  }
+
+  // --- the clearing, dressed. Everything below keys off the SAME clearingPts the
+  // treeline thins against, so the open stretch stays open while gaining a focal
+  // point and enough low scrub to read as meadow rather than a bald patch.
+  {
+    // Centre of the open stretch: the clearing point nearest the midpoint of the
+    // CLEARING_A..CLEARING_B span, found by walking the dirt run the same way the
+    // span itself was built. Derived, not hand-typed, so retuning A/B moves this too.
+    const mid = (CLEARING_A + CLEARING_B) / 2
+    let cx = 0, cz = 0, tanX = 0, tanZ = 1, bestD = Infinity
+    for (let i = 0; i < dirtSeq.length; i++) {
+      for (let s = 0; s < 8; s++) {
+        const u = (s + 0.5) / 8
+        const p = (i + u) / dirtSeq.length
+        if (Math.abs(p - mid) >= bestD) continue
+        bestD = Math.abs(p - mid)
+        const [px, pz] = dirtCenterlinePoint(dirtSeq[i], u)
+        const [ax, az] = dirtCenterlinePoint(dirtSeq[i], Math.min(1, u + 0.02))
+        const [bx, bz] = dirtCenterlinePoint(dirtSeq[i], Math.max(0, u - 0.02))
+        const tlen = Math.hypot(ax - bx, az - bz) || 1
+        cx = px; cz = pz
+        tanX = (ax - bx) / tlen; tanZ = (az - bz) / tlen
+      }
+    }
+    const nx = -tanZ, nz = tanX // lateral normal to the dirt run
+
+    // The retired coupe (CARS[5] — see shared/cars.ts), abandoned off the shoulder.
+    // Set well back from the racing line so it dresses the clearing rather than
+    // ambushing anyone sliding wide, and skewed ~40° off the road so it reads as
+    // dumped rather than parked.
+    const WRECK_OUT = 11 // m off the centreline
+    const wx = cx + nx * WRECK_OUT, wz = cz + nz * WRECK_OUT
+    const wrot = Math.atan2(tanX, tanZ) + 0.7
+    props.push({ kind: 'wreck', x: wx, z: wz, rot: wrot, variant: 0 })
+    // AABB hull of the angled car (4.5 × 1.9) — a wreck you could drive through
+    // would give the whole clearing away as scenery
+    const hl = CAR_LENGTH / 2, hw = CAR_WIDTH / 2
+    const sr = Math.abs(Math.sin(wrot)), cr = Math.abs(Math.cos(wrot))
+    colliders.push(box(wx, wz, hl * sr + hw * cr, hl * cr + hw * sr))
+
+    // Low scrub through the clearing. The global scatter culls hard here (that cull
+    // is what makes the stretch open at all), so the bushes it should have kept have
+    // to be put back deliberately. Bushes only, no colliders, no trees — the sightline
+    // across the clearing survives and you can still drive straight through it all.
+    for (let i = 0; i < 900; i++) {
+      const ang = hash2(i, 621) * Math.PI * 2
+      const rad = Math.sqrt(hash2(i, 622)) * 34 // sqrt → even area coverage, not centre-heavy
+      const x = cx + Math.cos(ang) * rad, z = cz + Math.sin(ang) * rad
+      // thickest in the middle of the clearing and feathering out into the treeline,
+      // which is the inverse of how the trees are distributed — the two interlock
+      if (hash2(i, 623) > 0.72 - clearingFalloff(x, z) * 0.45) continue
+      if (!clearOfRoadBy(x, z, 1.6) || inTacosTown(x, z, 8)) continue
+      if ((x - wx) ** 2 + (z - wz) ** 2 < 5 * 5) continue // keep the wreck readable
+      props.push({ kind: 'bush', x, z, rot: hash2(i, 624) * Math.PI * 2, variant: Math.floor(hash2(i, 625) * TREE_VARIANTS) })
     }
   }
 

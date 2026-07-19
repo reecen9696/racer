@@ -6,15 +6,14 @@ import { makeCarState, stepCar, collideCarPair, CarState, InputFrame } from '../
 import { TUNING, PHYS_DT, Tuning } from '../shared/constants'
 import { parseMap, ParsedMap, Zone } from '../shared/map'
 import { makeScore, stepScore, DriftScore } from '../shared/scoring'
-import { CARS, carDef, carTuning } from '../shared/cars'
-import { makeCopBrain, stepCopBrain, onCopHit, copSpawn, CopBrain, PIN_TIME, ARREST_IMMUNITY } from '../shared/police'
+import { CARS, DEFAULT_CAR, carDef, carTuning, isPlayable } from '../shared/cars'
+import { makeCopBrain, stepCopBrain, onCopHit, joinPursuit, copSpawn, CopBrain, PIN_TIME, ARREST_IMMUNITY, COP_COUNT } from '../shared/police'
 import { makeTrafficBrains, stepTrafficBrain, trafficSpawn, TrafficBrain } from '../shared/traffic'
 import { Interrogation, InterrogationFacts, CHAT_TIME_LIMIT_S } from './interrogation'
-
-const COP_ID = 'npc:cop'
+import { officerAt } from './officers'
 // Civilian cars, in menu order — deliberately not the red estate most players drive,
 // so a pair of headlights in the distance reads as "someone else" at a glance.
-const TRAFFIC_CARS = [3, 5, 1, 6, 7, 2]
+const TRAFFIC_CARS = [3, 1, 6, 7, 2, 4] // no 5 — the coupe is a wreck, it doesn't drive
 
 const ZONE_NAMES: Record<Zone, string> = {
   v: 'the village lane, past the houses',
@@ -71,32 +70,42 @@ const STALE_MS = 20000
 
 const COP_MODE_CODE: Record<CopBrain['mode'], number> = { patrol: 0, pursuit: 1, interrogate: 2, cooldown: 3 }
 
+interface Unit {
+  brain: CopBrain
+  car: CarState
+}
+
 export class DriftRoom extends Room<DriftState> {
   maxClients = 8
   private sims = new Map<string, Sim>()
   private map!: ParsedMap
-  private copBrain!: CopBrain
-  private copCar!: CarState
+  private cops: Unit[] = []
   private traffic: { brain: TrafficBrain; car: CarState; tuning: Tuning }[] = []
   private interrogation: Interrogation | null = null
   private frozenId = '' // player frozen mid-interrogation
+  private interrogatorId = '' // which unit is holding the stop
 
   onCreate(): void {
     this.setState(new DriftState())
     this.setPatchRate(50) // 20 Hz
     this.map = parseMap()
 
-    // --- the cop: a PlayerState like any other, so clients render him via the
-    // existing remote-interpolation path; the bot/copMode flags do the rest ---
-    this.copBrain = makeCopBrain(this.map)
-    const w0 = copSpawn(this.copBrain)
-    this.copCar = makeCarState(w0.x, w0.z, w0.yaw)
-    const cop = new PlayerState()
-    cop.bot = 1
-    cop.name = 'MILLBROOK POLICE'
-    cop.x = w0.x
-    cop.z = w0.z
-    this.state.players.set(COP_ID, cop)
+    // --- the shift: three units, one officer each, spread round the patrol ring.
+    // Each is a PlayerState like any other, so clients render them via the existing
+    // remote-interpolation path; the bot/copMode flags do the rest ---
+    for (let i = 0; i < COP_COUNT; i++) {
+      const brain = makeCopBrain(this.map, `npc:cop${i}`, i, i, COP_COUNT)
+      const w = copSpawn(brain)
+      const car = makeCarState(w.x, w.z, w.yaw)
+      const p = new PlayerState()
+      p.bot = 1
+      p.name = officerAt(i).name
+      p.x = w.x
+      p.z = w.z
+      p.yaw = w.yaw
+      this.state.players.set(brain.id, p)
+      this.cops.push({ brain, car })
+    }
 
     // --- civilian traffic: same deal, minus the light bar. bot = 2 so the client
     // renders them as ordinary cars and the leaderboard leaves them out ---
@@ -167,7 +176,8 @@ export class DriftRoom extends Room<DriftState> {
     p.x = typeof options?.sx === 'number' && isFinite(options.sx) ? options.sx : this.map.spawn.x + (idx % 4) * 5 - 7.5
     p.z = typeof options?.sz === 'number' && isFinite(options.sz) ? options.sz : this.map.spawn.z + Math.floor(idx / 4) * 5
     p.yaw = typeof options?.syaw === 'number' && isFinite(options.syaw) ? options.syaw : this.map.spawn.yaw
-    p.car = Math.max(0, Math.min(CARS.length - 1, Math.floor(options?.car ?? 0)))
+    const wanted = Math.max(0, Math.min(CARS.length - 1, Math.floor(options?.car ?? 0)))
+    p.car = isPlayable(wanted) ? wanted : DEFAULT_CAR // a stale saved pick can't put you in the wreck
     p.name = String(options?.name ?? 'driver').slice(0, 16)
     this.state.players.set(client.sessionId, p)
 
@@ -202,18 +212,21 @@ export class DriftRoom extends Room<DriftState> {
   // single teardown path for both onLeave and the stale sweep
   private dropPlayer(id: string): void {
     if (id === this.frozenId && this.interrogation) this.resolveInterrogation('arrest')
-    if (this.copBrain.targetId === id) {
-      this.copBrain.targetId = ''
-      this.copBrain.mode = 'cooldown'
-      this.copBrain.cooldownT = 3
-      this.copBrain.pinT = 0
+    // every unit that was after them stands down, not just the one holding the stop
+    for (const u of this.cops) {
+      if (u.brain.targetId !== id) continue
+      u.brain.targetId = ''
+      u.brain.assistId = ''
+      u.brain.mode = 'cooldown'
+      u.brain.cooldownT = 3
+      u.brain.pinT = 0
     }
     this.state.players.delete(id)
     this.sims.delete(id)
   }
 
   private tick(): void {
-    if (this.copBrain.tick % 60 === 0) this.sweepStale()
+    if (this.cops[0].brain.tick % 60 === 0) this.sweepStale()
     for (const [, sim] of this.sims) {
       const input = sim.queue.length ? sim.queue.shift()! : sim.lastInput
       sim.lastInput = input
@@ -237,20 +250,30 @@ export class DriftRoom extends Room<DriftState> {
       }
     }
 
-    // --- cop ---
+    // --- the shift ---
     const playerCars = new Map<string, CarState>()
     for (const [id, sim] of this.sims) playerCars.set(id, sim.car)
     const trafficCars = new Map<string, CarState>()
     for (const t of this.traffic) trafficCars.set(t.brain.id, t.car)
-    const res = stepCopBrain(this.copBrain, this.copCar, playerCars, PHYS_DT, trafficCars)
-    if (this.copBrain.mode !== 'interrogate') {
-      stepCar(this.copCar, res.input, TUNING, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
+    // Each unit sees the OTHER units as ordinary obstacles: `players` is what a cop
+    // pursues, so passing his colleagues in there would have him chase the shift.
+    // Handed in as traffic, they only feed the lane-yield check, which is exactly
+    // what keeps three patrol cars from stacking up nose-to-tail on the ring.
+    const pinnedNow = new Map<string, boolean>()
+    for (const u of this.cops) {
+      const obstacles = new Map(trafficCars)
+      for (const o of this.cops) if (o !== u) obstacles.set(o.brain.id, o.car)
+      const res = stepCopBrain(u.brain, u.car, playerCars, PHYS_DT, obstacles)
+      pinnedNow.set(u.brain.id, res.pinnedNow)
+      if (u.brain.mode !== 'interrogate') {
+        stepCar(u.car, res.input, TUNING, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
+      }
     }
 
     // --- civilian traffic ---
-    // Every car on the road is an obstacle to them, including each other and the cop.
+    // Every car on the road is an obstacle to them, including each other and the police.
     const road = new Map(playerCars)
-    road.set(COP_ID, this.copCar)
+    for (const u of this.cops) road.set(u.brain.id, u.car)
     for (const [id, c] of trafficCars) road.set(id, c)
     for (const t of this.traffic) {
       const r = stepTrafficBrain(t.brain, t.car, road, PHYS_DT)
@@ -263,29 +286,47 @@ export class DriftRoom extends Room<DriftState> {
     for (let i = 0; i < this.traffic.length; i++) {
       const t = this.traffic[i]
       for (let j = i + 1; j < this.traffic.length; j++) collideCarPair(t.car, this.traffic[j].car)
-      if (this.copBrain.mode !== 'interrogate') collideCarPair(t.car, this.copCar)
+      for (const u of this.cops) {
+        if (u.brain.mode !== 'interrogate') collideCarPair(t.car, u.car)
+      }
       for (const [id, sim] of this.sims) {
-        if (id === this.frozenId && this.copBrain.mode === 'interrogate') continue // don't shove a stopped driver mid-caution
+        if (id === this.frozenId) continue // don't shove a stopped driver mid-caution
         collideCarPair(t.car, sim.car)
       }
     }
 
-    // cop-vs-player collisions + aggro (skip the frozen pair)
-    for (const [id, sim] of this.sims) {
-      if (id === this.frozenId && this.copBrain.mode === 'interrogate') continue
-      const impact = collideCarPair(this.copCar, sim.car)
-      if (impact > 0 && onCopHit(this.copBrain, id, impact, this.copCar.speed)) {
-        this.broadcast('cop:aggro', { id }) // clients: siren chirp → loop, lights on
+    // patrol car vs patrol car — physical only, and never an offence against anyone
+    for (let i = 0; i < this.cops.length; i++) {
+      for (let j = i + 1; j < this.cops.length; j++) {
+        if (this.cops[i].brain.mode === 'interrogate' || this.cops[j].brain.mode === 'interrogate') continue
+        collideCarPair(this.cops[i].car, this.cops[j].car)
       }
     }
 
-    // pin → interrogation
-    if (res.pinnedNow && this.copBrain.pinT >= PIN_TIME && !this.interrogation) {
-      this.startInterrogation(this.copBrain.targetId)
+    // cop-vs-player collisions + aggro (skip the frozen pair)
+    for (const u of this.cops) {
+      if (u.brain.mode === 'interrogate') continue
+      for (const [id, sim] of this.sims) {
+        if (id === this.frozenId) continue
+        const impact = collideCarPair(u.car, sim.car)
+        if (impact > 0 && onCopHit(u.brain, id, impact, u.car.speed)) {
+          // all units respond: one car calls it in, the shift comes running
+          for (const o of this.cops) if (o !== u) joinPursuit(o.brain, id)
+          this.broadcast('cop:aggro', { id }) // clients: siren chirp → loop, lights on
+        }
+      }
+    }
+
+    // pin → interrogation. First unit to hold a full pin gets the stop; the rest keep
+    // their lights on around it until resolveInterrogation stands them down.
+    if (!this.interrogation) {
+      const pinner = this.cops.find((u) => pinnedNow.get(u.brain.id) && u.brain.pinT >= PIN_TIME)
+      if (pinner) this.startInterrogation(pinner, pinner.brain.targetId)
     }
 
     // freeze the interrogated pair every tick (authority — prediction obeys via reconcile)
-    if (this.copBrain.mode === 'interrogate') {
+    const holder = this.cops.find((u) => u.brain.id === this.interrogatorId)
+    if (holder && holder.brain.mode === 'interrogate') {
       const sim = this.sims.get(this.frozenId)
       if (sim) {
         sim.car.vx = 0
@@ -293,9 +334,9 @@ export class DriftRoom extends Room<DriftState> {
         sim.car.yawRate = 0
         sim.queue.length = 0
       }
-      this.copCar.vx = 0
-      this.copCar.vz = 0
-      this.copCar.yawRate = 0
+      holder.car.vx = 0
+      holder.car.vz = 0
+      holder.car.yawRate = 0
       if (this.interrogation && this.interrogation.timeLeft() <= 0) {
         this.resolveInterrogation(this.interrogation.forceVerdict()) // clock ran out
       }
@@ -323,19 +364,22 @@ export class DriftRoom extends Room<DriftState> {
       p.lastSeq = input.seq
     }
 
-    const c = this.state.players.get(COP_ID)
-    if (c) {
-      c.x = this.copCar.x
-      c.z = this.copCar.z
-      c.yaw = this.copCar.yaw
-      c.vx = this.copCar.vx
-      c.vz = this.copCar.vz
-      c.speed = this.copCar.speed
-      c.slip = this.copCar.slipAngle
-      c.rpm = this.copCar.rpm
-      c.copMode = COP_MODE_CODE[this.copBrain.mode]
-      c.pinT = this.copBrain.pinT
-      c.copTarget = this.copBrain.targetId
+    for (const u of this.cops) {
+      const c = this.state.players.get(u.brain.id)
+      if (!c) continue
+      c.x = u.car.x
+      c.z = u.car.z
+      c.yaw = u.car.yaw
+      c.vx = u.car.vx
+      c.vz = u.car.vz
+      c.speed = u.car.speed
+      c.slip = u.car.slipAngle
+      c.rpm = u.car.rpm
+      // a unit on the way to a shout is running blues even though he is still following
+      // the patrol ring — the client keys the light bar and siren off copMode >= 1
+      c.copMode = u.brain.assistId ? 1 : COP_MODE_CODE[u.brain.mode]
+      c.pinT = u.brain.pinT
+      c.copTarget = u.brain.targetId
       c.headlights = true
     }
 
@@ -369,37 +413,45 @@ export class DriftRoom extends Room<DriftState> {
     return ZONE_NAMES[best.zone] ?? 'a country lane'
   }
 
-  private startInterrogation(targetId: string): void {
+  private startInterrogation(unit: Unit, targetId: string): void {
     const sim = this.sims.get(targetId)
     const p = this.state.players.get(targetId)
     const client = this.clients.find((cl) => cl.sessionId === targetId)
     if (!sim || !p || !client) {
-      this.copBrain.mode = 'cooldown'
-      this.copBrain.cooldownT = 5
+      unit.brain.mode = 'cooldown'
+      unit.brain.cooldownT = 5
       return
     }
-    this.copBrain.mode = 'interrogate'
+    unit.brain.mode = 'interrogate'
     this.frozenId = targetId
+    this.interrogatorId = unit.brain.id
+    // The collision telemetry lives on whichever unit was actually hit, which is not
+    // always the one that ends up pinning — a responder joins a pursuit with an empty
+    // chase clock. Read the facts off the unit that has real numbers for this driver.
+    const src = this.cops.reduce((a, b) => (b.brain.targetId === targetId && b.brain.hitSpeed > a.brain.hitSpeed ? b : a), unit)
+    const chaseT = Math.max(...this.cops.filter((u) => u.brain.targetId === targetId).map((u) => u.brain.chaseT), 0)
     const facts: InterrogationFacts = {
-      impactSpeedKmh: this.copBrain.hitSpeed * 3.6,
-      hitWhileParked: this.copBrain.hitWhileParked,
-      chaseDurationS: this.copBrain.chaseT,
-      playerTopSpeedKmh: this.copBrain.targetTopSpeed * 3.6,
-      priorOffenses: this.copBrain.offenses.get(targetId) ?? 1,
+      impactSpeedKmh: src.brain.hitSpeed * 3.6,
+      hitWhileParked: src.brain.hitWhileParked,
+      chaseDurationS: chaseT,
+      playerTopSpeedKmh: Math.max(...this.cops.map((u) => u.brain.targetTopSpeed), 0) * 3.6,
+      // offences are tracked per unit; the shift shares a driver's record for the night
+      priorOffenses: this.cops.reduce((n, u) => n + (u.brain.offenses.get(targetId) ?? 0), 0) || 1,
       sessionScore: p.score,
       playerCarColor: carDef(p.car).colour,
       playerCarKind: carDef(p.car).label.toLowerCase(),
       playerName: p.name,
       locationNow: this.zoneNameAt(sim.car.x, sim.car.z),
-      escapeAttempted: this.copBrain.chaseT > 3,
+      escapeAttempted: chaseT > 3,
     }
-    const active = new Interrogation(facts)
+    const officer = officerAt(unit.brain.officer)
+    const active = new Interrogation(facts, officer)
     this.interrogation = active
     active
       .open()
       .then((turn) => {
-        if (this.interrogation !== active) return // resolved while Bram was thinking
-        client.send('cop:open', { ...turn, timeLimit: CHAT_TIME_LIMIT_S, score: p.score })
+        if (this.interrogation !== active) return // resolved while he was thinking
+        client.send('cop:open', { ...turn, officer: officer.name, timeLimit: CHAT_TIME_LIMIT_S, score: p.score })
       })
       .catch((e) => console.warn('[cop] interrogation open failed:', e))
   }
@@ -415,14 +467,24 @@ export class DriftRoom extends Room<DriftState> {
       sim.car.vz = 0
       sim.car.yawRate = 0
       sim.score = makeScore() // points seized
-      this.copBrain.immunity.set(this.frozenId, ARREST_IMMUNITY)
+    }
+    // Immunity has to land on EVERY unit, not just the one who booked them: the other
+    // two are still in pursuit at this moment, and without it the nearest one re-aggros
+    // on the driver the instant they are released.
+    if (verdict === 'arrest') {
+      for (const u of this.cops) u.brain.immunity.set(this.frozenId, ARREST_IMMUNITY)
     }
     this.broadcast('cop:verdict', { id: this.frozenId, verdict })
     this.interrogation = null
     this.frozenId = ''
-    this.copBrain.mode = 'cooldown'
-    this.copBrain.cooldownT = 6
-    this.copBrain.targetId = ''
-    this.copBrain.pinT = 0
+    this.interrogatorId = ''
+    // the whole shift stands down, not just the officer at the window
+    for (const u of this.cops) {
+      u.brain.mode = 'cooldown'
+      u.brain.cooldownT = 6
+      u.brain.targetId = ''
+      u.brain.assistId = ''
+      u.brain.pinT = 0
+    }
   }
 }

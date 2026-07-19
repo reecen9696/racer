@@ -41,11 +41,11 @@ export interface TrafficBrain {
   lastZ: number
 }
 
-// Five on an 844 m loop: you meet someone every few corners without them ever forming a
-// rolling roadblock. Split so most run with the loop and a couple come the other way —
-// oncoming headlights are most of what makes the road feel inhabited at night.
-export const TRAFFIC_COUNT = 5
-export const ONCOMING_COUNT = 2
+// Seven on an 844 m loop: you meet someone every couple of corners without them ever
+// forming a rolling roadblock. Split so most run with the loop and a few come the other
+// way — oncoming headlights are most of what makes the road feel inhabited at night.
+export const TRAFFIC_COUNT = 7
+export const ONCOMING_COUNT = 3
 // Just under the cop's 13 m/s patrol, so he's always the faster car on the road but
 // closes at ~1 m/s and only rarely ends up queued behind one. Dropping this to 10 put
 // him within 25 m of a civilian for 178 s of a 300 s patrol — technically correct,

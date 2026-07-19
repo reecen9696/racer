@@ -19,6 +19,10 @@ export interface CarDef {
   // which is what every global handling pass is tuned against). Multipliers, not
   // absolutes, so the backtick panel and future re-tunes shift the whole garage.
   phys: Partial<Record<keyof Tuning, number>>
+  // Retired from the garage: the model reads as a wrecked car, so it dresses the map
+  // instead of being driven. Kept in the array (rather than deleted) so every index
+  // downstream — saved selections, PlayerState.car, TRAFFIC_CARS — keeps its meaning.
+  wreck?: true
 }
 
 export const CARS: CarDef[] = [
@@ -39,9 +43,10 @@ export const CARS: CarDef[] = [
   // big-block cruiser: strongest straight-line pull, barge in the corners, floaty rear
   { label: 'CRUISER',  colour: 'green',      obj: '/assets/cars/car05/Car5.obj', tex: '/assets/cars/car05/car5_green.png',       swatch: '#24543c',
     phys: { mass: 1.28, inertia: 1.35, engineForce: 1.42, brakeForce: 0.95, maxSpeed: 1.05, cgHeight: 1.05, gripFront: 0.97, gripRear: 0.97, yawDamping: 0.9 } },
-  // sports coupe: the driver's car — light, low, best brakes and grip, highest top end
+  // NOT DRIVABLE — the model is a wreck, so it sits in the clearing off the dirt road
+  // (see WRECK in map.ts) instead of appearing in the garage or in traffic
   { label: 'COUPE',    colour: 'brown',      obj: '/assets/cars/car06/Car6.obj', tex: '/assets/cars/car06/car6.png',             swatch: '#84543c',
-    phys: { mass: 0.95, inertia: 0.88, engineForce: 1.2, brakeForce: 1.18, maxSpeed: 1.12, cgHeight: 0.8, gripFront: 1.07, gripRear: 1.07, steerAttack: 1.1 } },
+    phys: {}, wreck: true },
   // 4x4: tall and heavy on tarmac, but shrugs off dirt/grass drag (rollingResist
   // is what the surface drag multiplier scales) and puts power down anywhere
   { label: '4X4',      colour: 'silver',     obj: '/assets/cars/car07/Car7.obj', tex: '/assets/cars/car07/car7_grey.png',        swatch: '#848484',
@@ -49,9 +54,37 @@ export const CARS: CarDef[] = [
   // box van: the joke tank — heaviest, slowest, tallest, worst brakes. Commit to it.
   { label: 'BOX VAN',  colour: 'purple',     obj: '/assets/cars/car08/Car8.obj', tex: '/assets/cars/car08/Car8_purple.png',      swatch: '#54546c',
     phys: { mass: 1.5, inertia: 1.65, engineForce: 0.98, brakeForce: 0.82, reverseForce: 0.9, maxSpeed: 0.78, cgHeight: 1.6, gripFront: 0.9, gripRear: 0.92, yawDamping: 1.15 } },
+
+  // --- second rank: the pack ships one more BODY (the taxi) and a shelf of unused
+  // liveries. These three are the ones with a real identity of their own rather than
+  // a recolour of a car already in the list — each drives differently enough to be
+  // worth picking. Appended, never inserted: the index IS the wire-format car id.
+  //
+  // taxi: the cruiser shell with a roof sign — the only unused body in cars_PSX.
+  // A high-mileage fleet car: same big engine, tired springs and brakes.
+  { label: 'TAXI',     colour: 'yellow',     obj: '/assets/cars/car05/Car5_Taxi.obj', tex: '/assets/cars/car05/car5_taxi.png',  swatch: '#c8a416',
+    phys: { mass: 1.3, inertia: 1.38, engineForce: 1.3, brakeForce: 0.82, maxSpeed: 1.0, cgHeight: 1.15, gripFront: 0.9, gripRear: 0.88, yawDamping: 0.85, driftGripLoss: 1.2 } },
+  // mail van: the box van's working sibling — loaded tail-heavy, so it pivots on the
+  // rear axle far more willingly than the purple one and needs respect on the brakes
+  { label: 'MAIL VAN', colour: 'white',      obj: '/assets/cars/car08/Car8.obj', tex: '/assets/cars/car08/Car8_mail.png',        swatch: '#b8b4a8',
+    phys: { mass: 1.42, inertia: 1.5, engineForce: 1.06, brakeForce: 0.85, reverseForce: 0.92, maxSpeed: 0.84, cgHeight: 1.5, gripFront: 0.95, gripRear: 0.86, yawDamping: 0.92 } },
+  // rally: the 4x4 shell built for the dirt run — shrugs off surface drag like the
+  // silver one but geared shorter and sprung to rotate, so it's the loose-surface tool
+  { label: 'RALLY',    colour: 'red',        obj: '/assets/cars/car07/Car7.obj', tex: '/assets/cars/car07/car7_red.png',         swatch: '#8c2418',
+    phys: { mass: 1.1, inertia: 1.08, engineForce: 1.15, brakeForce: 1.02, maxSpeed: 0.94, cgHeight: 1.2, gripFront: 1.0, gripRear: 0.94, rollingResist: 0.5, driveTraction: 1.15, steerAttack: 1.15, handbrakeKick: 1.25 } },
 ]
 
 export const DEFAULT_CAR = 0 // the red estate — the car the game shipped with
+
+// the garage: what the menu offers and what a join is allowed to pick
+export const PLAYABLE = CARS.map((c, i) => (c.wreck ? -1 : i)).filter((i) => i >= 0)
+
+// the retired model, for the map dressing that uses it (see the 'wreck' prop)
+export const WRECK_CAR = CARS.findIndex((c) => c.wreck)
+
+export function isPlayable(i: number): boolean {
+  return !!CARS[i] && !CARS[i].wreck
+}
 
 export function carDef(i: number): CarDef {
   return CARS[i] ?? CARS[DEFAULT_CAR]

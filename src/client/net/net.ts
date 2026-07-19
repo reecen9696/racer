@@ -42,6 +42,7 @@ export interface CopTurnMsg {
   reply: string
   disposition: number // drives the happy/annoyed sting — never rendered as a number
   verdict: 'pending' | 'release' | 'arrest'
+  officer?: string // sent on cop:open only — which of the three pulled you over
   timeLimit?: number
   score?: number
 }

@@ -8,7 +8,7 @@ import { parseMap } from '../src/shared/map'
 import { Interrogation } from '../src/server/interrogation'
 
 const map = parseMap()
-const brain = makeCopBrain(map)
+const brain = makeCopBrain(map, 'npc:cop0', 0)
 const s0 = copSpawn(brain)
 const cop = makeCarState(s0.x, s0.z, s0.yaw)
 const players = new Map<string, CarState>()
@@ -66,10 +66,10 @@ console.log(`pursuit 25s: dist ${Math.hypot(cop.x - p.x, cop.z - p.z).toFixed(1)
   console.log(`\n--- interrogation (${process.env.ANTHROPIC_API_KEY ? 'live API' : 'scripted fallback — no ANTHROPIC_API_KEY'}) ---`)
   console.log(`opening disposition ${it.disposition}/100`)
   const open = await it.open()
-  console.log(`bram: ${open.reply}  «${open.mood}»`)
+  console.log(`bram: ${open.reply}`)
   for (const line of ['who cares, pig', 'sorry mate, that was my fault entirely', 'i will go straight home, promise']) {
     const t = await it.playerSays(line)
-    console.log(`you : ${line}\nbram: ${t.reply}  «${t.mood}»  [${t.disposition}/100 → ${t.verdict}]`)
+    console.log(`you : ${line}\nbram: ${t.reply}  [${t.disposition}/100 → ${t.verdict}]`)
     if (t.verdict !== 'pending') break
   }
 })()

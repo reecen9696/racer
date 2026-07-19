@@ -9,6 +9,7 @@ export class CopChat {
   private clock: HTMLElement
   private banner: HTMLElement
   private giveIn: HTMLButtonElement
+  private who: HTMLElement
   open = false
   private deadline = 0
   private onSend: (text: string) => void = () => {}
@@ -20,7 +21,7 @@ export class CopChat {
     this.el.style.display = 'none'
     this.el.innerHTML = `
       <div id="cop-frame">
-        <div id="cop-head"><span id="cop-who">SGT. BRAM HOLLIS · MILLBROOK POLICE</span><span id="cop-clock">90</span></div>
+        <div id="cop-head"><span id="cop-who">MILLBROOK POLICE</span><span id="cop-clock">90</span></div>
         <div id="cop-log"></div>
         <textarea id="cop-input" maxlength="200" rows="3" placeholder="say something…" autocomplete="off" spellcheck="false"></textarea>
         <div id="cop-foot"><span id="cop-hint">ENTER TO SPEAK · SHIFT+ENTER FOR A NEW LINE</span><button id="cop-give-in" type="button">GIVE IN</button></div>
@@ -33,6 +34,7 @@ export class CopChat {
     this.clock = this.el.querySelector('#cop-clock')!
     this.banner = this.el.querySelector('#cop-banner')!
     this.giveIn = this.el.querySelector('#cop-give-in') as HTMLButtonElement
+    this.who = this.el.querySelector('#cop-who')!
 
     this.input.addEventListener('keydown', (e) => {
       e.stopPropagation() // never let WASD in the reply box drive the car
@@ -67,6 +69,8 @@ export class CopChat {
     this.banner.className = ''
     this.banner.textContent = ''
     this.el.style.display = 'block'
+    // whichever of the three units pinned you is the one at the window
+    this.who.textContent = (turn.officer ? turn.officer + ' · ' : '') + 'MILLBROOK POLICE'
     this.deadline = performance.now() / 1000 + (turn.timeLimit ?? 90)
     this.say(turn)
   }

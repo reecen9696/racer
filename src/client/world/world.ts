@@ -2,7 +2,8 @@
 // ground, props, lamp posts. Also owns the light list used to tint everything.
 import * as THREE from 'three'
 import { TILE } from '../../shared/constants'
-import { ParsedMap, Lamp, Prop, RoadTile, hash2, dirtCenterlinePoint } from '../../shared/map'
+import { ParsedMap, Lamp, Prop, RoadTile, hash2, dirtCenterlinePoint, TACOS_TOWN } from '../../shared/map'
+import { TACOS_BOUNDS } from '../../shared/tacosTown.generated'
 import { loadGLB, loadFBX, loadTexture, LoadedModel } from './assets'
 import { patchMaterial, psxTexture } from '../renderer/patch'
 import { buildTacosTown } from './tacos'
@@ -95,10 +96,20 @@ export class World {
     const colors = new Float32Array(pos.count * 3)
     const tint = new THREE.Color()
     const mx = 0.42, my = 0.78, mz = -0.46 // moon direction for baked slope shading
+    // terrain dips under the Tacos town footprint: its road mesh sits only a few
+    // cm above the height field, and the PSX vertex snap makes coplanar surfaces
+    // flicker-fight — feather the grass 40 cm down so the town always wins
+    const townDip = (x: number, z: number): number => {
+      const inside = Math.min(
+        x - (TACOS_TOWN.x + TACOS_BOUNDS.minX), TACOS_TOWN.x + TACOS_BOUNDS.maxX - x,
+        z - (TACOS_TOWN.z + TACOS_BOUNDS.minZ), TACOS_TOWN.z + TACOS_BOUNDS.maxZ - z,
+      )
+      return inside <= 0 ? 0 : 0.4 * Math.min(1, inside / 10)
+    }
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i)
       const h = this.map.heightAt(x, z)
-      pos.setY(i, h - 0.06)
+      pos.setY(i, h - 0.06 - townDip(x, z))
       this.lampTintAt(x, z, tint)
       // fake Gouraud moonlight on the terrain: slopes facing the moon lighten,
       // far sides darken — without this, hills read as black voids at night

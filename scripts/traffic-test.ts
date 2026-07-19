@@ -161,7 +161,7 @@ const check = (ok: boolean, label: string) => {
 // its own — so drop him straight in behind a civilian and hold him there. ---
 {
   const cars = spawn()
-  const brain = makeCopBrain(map)
+  const brain = makeCopBrain(map, 'npc:cop0', 0)
   const s0 = copSpawn(brain)
   const cop = makeCarState(s0.x, s0.z, s0.yaw)
   // rewind him ~14 m up the lane from the first civilian, already at patrol speed
@@ -202,7 +202,7 @@ const check = (ok: boolean, label: string) => {
 // own rear-end shunt. Off duty he yields; mid-pursuit he must not. ---
 {
   for (const mode of ['patrolling', 'in pursuit'] as const) {
-    const brain = makeCopBrain(map)
+    const brain = makeCopBrain(map, 'npc:cop0', 0)
     const s0 = copSpawn(brain)
     const cop = makeCarState(s0.x, s0.z, s0.yaw)
     // a player stopped on the ring, ~25 m down the lane from where he starts

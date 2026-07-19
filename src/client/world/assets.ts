@@ -99,13 +99,28 @@ export interface CarModel {
 
 // playable cars live in shared/cars.ts (the server names them for the interrogation)
 
-// parked-car dressing variety: Car 02 coupe with its own texture variants
+// Parked-car dressing. Deliberately the liveries the GARAGE doesn't use, so a car at
+// the kerb never reads as another player's — the drivable colours stay exclusive to
+// drivable cars. Every body in the pack appears, since a street of one silhouette
+// repeated is the thing that gives a small asset pack away.
 const PARKED_VARIANTS: Array<[string, string]> = [
   ['/assets/cars/car01/Car.obj', '/assets/cars/car01/car_gray.png'],
+  ['/assets/cars/car01/Car.obj', '/assets/cars/car01/car_blue.png'],
   ['/assets/cars/car02/Car2.obj', '/assets/cars/car02/car2.png'],
   ['/assets/cars/car02/Car2.obj', '/assets/cars/car02/car2_black.png'],
   ['/assets/cars/car02/Car2.obj', '/assets/cars/car02/car2_red.png'],
+  ['/assets/cars/car03/Car3.obj', '/assets/cars/car03/car3_red.png'],
+  ['/assets/cars/car04/Car4.obj', '/assets/cars/car04/car4_grey.png'],
+  ['/assets/cars/car04/Car4.obj', '/assets/cars/car04/car4_lightgrey.png'],
+  ['/assets/cars/car05/Car5.obj', '/assets/cars/car05/car5_grey.png'],
+  ['/assets/cars/car05/Car5_Taxi.obj', '/assets/cars/car05/car5_taxi.png'],
+  ['/assets/cars/car07/Car7.obj', '/assets/cars/car07/car7_black.png'],
+  ['/assets/cars/car07/Car7.obj', '/assets/cars/car07/car7_brown.png'],
+  ['/assets/cars/car07/Car7.obj', '/assets/cars/car07/car7_green.png'],
+  ['/assets/cars/car08/Car8.obj', '/assets/cars/car08/Car8_grey.png'],
 ]
+
+export const PARKED_VARIANT_COUNT = PARKED_VARIANTS.length
 
 // the police cruiser ships as its own OBJ + texture in the Car 05 folder
 const POLICE_OBJ = '/assets/cars/car05/Car5_Police.obj'

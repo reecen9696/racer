@@ -13,10 +13,13 @@ export type CopMode = 'patrol' | 'pursuit' | 'interrogate' | 'cooldown'
 export type { Waypoint }
 
 export interface CopBrain {
+  id: string // 'npc:cop0' — matches the PlayerState key the room publishes
+  officer: number // index into server/officers.ts OFFICERS — who is behind the wheel
   mode: CopMode
   path: Waypoint[] // lane-offset patrol ring built from map.loopOrder
   wpIndex: number
   targetId: string // pursuit / interrogation target
+  assistId: string // responding to another unit's call — see joinPursuit
   pinT: number // 0..PIN_TIME accumulated pin seconds
   disengageT: number // s target has been out of range
   cooldownT: number // s remaining before patrol resumes aggro checks
@@ -52,8 +55,12 @@ export const UNWEDGE_UNSEEN = 4 // ...but if nobody's near enough to see it, don
 export const UNSEEN_DIST = 70 // m — beyond this the teleport is nobody's business
 export const WEDGE_PROGRESS = 6 // m of real travel that counts as "he's moving again"
 
-const PATROL_SPEED = 13 // m/s ≈ 47 km/h
-const PURSUIT_SPEED = 46 // just under player maxSpeed; rubber band does the rest
+export const COP_COUNT = 3 // three units on the night shift, one officer each
+export const ASSIST_RANGE = 130 // m — a responder switches from driving to hunting
+
+const PATROL_SPEED = 15 // m/s ≈ 54 km/h — still above the civilians' ~12
+const RESPOND_SPEED = 27 // m/s ≈ 97 km/h — blues-and-twos along the ring, not yet hunting
+const PURSUIT_SPEED = 50 // just under player maxSpeed (52); rubber band does the rest
 const LANE_OFFSET = 2.1 // m right of centerline
 
 const TILE_SAMPLES = 5 // per tile — corners are quarter arcs, so straight-lining cuts them
@@ -113,21 +120,28 @@ export function buildPatrolPath(map: ParsedMap, reverse = false): Waypoint[] {
   return out
 }
 
-// Where the cop starts his shift — on the ring, ALREADY FACING along it. Spawning
-// him at yaw 0 points him at whatever the map's +z happens to be, which is usually
-// a hedge, and he opens the session by reversing out of a garden.
+// Where a cop starts his shift — on the ring at his own waypoint, ALREADY FACING
+// along it. Spawning at yaw 0 points him at whatever the map's +z happens to be,
+// which is usually a hedge, and he opens the session by reversing out of a garden.
 export function copSpawn(brain: CopBrain): { x: number; z: number; yaw: number } {
-  const a = brain.path[0]
-  const b = brain.path[1 % brain.path.length]
+  const n = brain.path.length
+  const a = brain.path[brain.wpIndex % n]
+  const b = brain.path[(brain.wpIndex + 1) % n]
   return { x: a.x, z: a.z, yaw: Math.atan2(b.x - a.x, b.z - a.z) }
 }
 
-export function makeCopBrain(map: ParsedMap): CopBrain {
+// `seat` of `seats` spreads the units evenly round the ring, so the shift starts
+// spaced out rather than as a three-car convoy leaving the same waypoint.
+export function makeCopBrain(map: ParsedMap, id: string, officer: number, seat = 0, seats = 1): CopBrain {
+  const path = buildPatrolPath(map)
   return {
+    id,
+    officer,
     mode: 'patrol',
-    path: buildPatrolPath(map),
-    wpIndex: 0,
+    path,
+    wpIndex: Math.floor((path.length * seat) / Math.max(1, seats)),
     targetId: '',
+    assistId: '',
     pinT: 0,
     disengageT: 0,
     cooldownT: 0,
@@ -286,6 +300,25 @@ export function stepCopBrain(
     brain.stuckT = 0
   }
 
+  // --- responding to another unit's call ---
+  // A responder does NOT go straight to pursuit. Pursuit steers pure-dead-reckoned at
+  // the target, which from the far side of the village aims him through three gardens
+  // and a pub; and at 400 m he is past DISENGAGE_DIST, so he would give up before he
+  // ever arrived — which is exactly what the shift did in testing. Instead he stays on
+  // the patrol ring with the lights on, driving it hard, and only converts to a real
+  // pursuit once the target is close enough for pure pursuit to mean anything.
+  if (brain.assistId) {
+    const t = players.get(brain.assistId)
+    if (!t) brain.assistId = ''
+    else if (dist(cop.x, cop.z, t.x, t.z) < ASSIST_RANGE) {
+      brain.mode = 'pursuit'
+      brain.targetId = brain.assistId
+      brain.assistId = ''
+      brain.disengageT = 0
+      brain.pinT = 0
+    }
+  }
+
   if (brain.mode === 'pursuit') {
     const target = players.get(brain.targetId)
     if (!target) {
@@ -390,7 +423,11 @@ export function stepCopBrain(
   // exactly the kind of contact that then makes it YOUR problem, since a hard enough
   // knock trips onCopHit and he pursues you for a collision he caused. `laneAhead` is
   // null in pursuit — nothing yields mid-chase, least of all to the car he's chasing.
-  const targetSpeed = Math.min(PATROL_SPEED * clamp(1 - curve * 0.3, 0.42, 1), laneSpeed)
+  // Responding to a call he drives the same ring, considerably faster. Still capped by
+  // `laneSpeed`: arriving at a shout is no excuse for going through the back of a
+  // civilian, and a pile-up in the village is how a responder becomes the incident.
+  const cruise = brain.assistId ? RESPOND_SPEED : PATROL_SPEED
+  const targetSpeed = Math.min(cruise * clamp(1 - curve * 0.3, 0.42, 1), laneSpeed)
 
   const aim = pointAhead(brain.path, brain.wpIndex, cop, clamp(5 + Math.abs(cop.speed) * 0.85, 6, 20))
   input.steer = steerToward(cop, aim.x, aim.z)
@@ -426,6 +463,26 @@ export function onCopHit(brain: CopBrain, playerId: string, impactSpeed: number,
   brain.mode = 'pursuit'
   brain.pinT = 0
   brain.disengageT = 0
+  brain.chaseT = 0
+  brain.targetTopSpeed = 0
+  return true
+}
+
+// One unit calls it in and the whole shift responds. The caller broadcasts this to
+// every OTHER brain; it is deliberately not a no-op for a cop already chasing someone
+// else — there are only ever a few drivers out here at 2 AM, and a pursuit in progress
+// is the most interesting thing on the radio.
+//
+// The joining unit gets the target but NOT the telemetry: chaseT, hitSpeed and
+// hitWhileParked stay with whoever was actually hit, because those are the facts read
+// out at the stop. A responder inherits an empty chase clock and, if he is the one who
+// ends up pinning, the room copies the originating unit's numbers across.
+export function joinPursuit(brain: CopBrain, targetId: string): boolean {
+  if (brain.mode === 'interrogate') return false // he has someone at the window already
+  if (brain.mode === 'pursuit' && brain.targetId === targetId) return false
+  if (brain.immunity.has(targetId)) return false // just booked them — let them go
+  brain.assistId = targetId // stepCopBrain promotes this to a real pursuit within ASSIST_RANGE
+  brain.mode = 'patrol' // cancels any cooldown so he moves off now, not in five seconds
   brain.chaseT = 0
   brain.targetTopSpeed = 0
   return true
