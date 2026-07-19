@@ -1,6 +1,7 @@
 // The map IS a text grid (Part 2 §B.2). One char per TILE. Road piece + rotation are
 // inferred from the 4-neighborhood, so the loop can be redrawn freely.
-// Chars: '.' grass · road tiles carry their zone: v=village, e=hedge lanes, p=fields, w=forest.
+// Chars: '.' grass · road tiles carry their zone: v=village, e=hedge lanes, p=fields,
+// w=forest, h=highway (wider Highway_* pieces; branches off the loop, never part of it).
 // Everything (visuals, lamps, props, collision, surfaces) derives from this one grid,
 // so the server never loads a model.
 import { TILE } from './constants'
@@ -10,10 +11,10 @@ export const MAP_TEXT = `
 ........................
 ........................
 ...vvvvvvvvv............
-...v.......v............
-...v.......v............
-...v.......eeee.........
-...v..........e.........
+...v.......vhhhhhh......
+...v.......v.....hhhh...
+...v.......eeee.....h...
+...v..........ehhhhhh...
 ...w..........e.........
 ...w..........eeeee.....
 ...w..............e.....
@@ -26,7 +27,7 @@ export const MAP_TEXT = `
 ........................
 `.trim()
 
-export type Zone = 'v' | 'e' | 'p' | 'w'
+export type Zone = 'v' | 'e' | 'p' | 'w' | 'h'
 export type Piece = 'straight' | 'corner' | 't' | 'cross' | 'end'
 
 export interface RoadTile {
@@ -52,7 +53,7 @@ export interface Lamp {
 }
 
 export interface Prop {
-  kind: 'house' | 'hedge' | 'tree_big' | 'tree_small' | 'bush' | 'fence' | 'cone' | 'sign' | 'parked' | 'tower' | 'rock' | 'wreck' | 'lampProp' | 'gas'
+  kind: 'house' | 'hedge' | 'tree_big' | 'tree_small' | 'bush' | 'fence' | 'cone' | 'sign' | 'parked' | 'tower' | 'gazebo' | 'rock' | 'wreck' | 'lampProp' | 'gas'
   x: number; z: number
   rot: number
   variant: number
@@ -81,6 +82,8 @@ export function hash2(a: number, b: number, salt = 0): number {
 }
 
 const ROAD_HALF = 5.0 // asphalt half-width (measured from Road_Straight GLB)
+const HWY_HALF = 7.0 // highway asphalt half-width (Highway_* GLBs scaled to the tile pitch)
+const HWY_EDGE = 7.78 // highway shoulder edge — the scaled piece spans the full tile
 const S_AMP = 0 // dirt-road S amplitude — user preferred straight segments (corners still arc)
 
 // Centerline of the dirt road through a tile, u in [0,1] from one arm edge to the other.
@@ -91,8 +94,15 @@ export function dirtCenterlinePoint(t: RoadTile, u: number): [number, number] {
   if (t.dirs.w) arms.push([-1, 0])
   if (t.dirs.s) arms.push([0, 1])
   if (t.dirs.e) arms.push([1, 0])
-  if (t.piece === 'straight') {
-    const [ax, az] = arms[0]
+  // T/cross tiles with a pair of opposite arms (highway junctions) route straight
+  // through on that axis — the branch is somebody else's tile geometry
+  const throughAxis: [number, number] | null =
+    t.piece === 'straight' ? arms[0]
+    : t.dirs.n && t.dirs.s ? [0, -1]
+    : t.dirs.e && t.dirs.w ? [1, 0]
+    : null
+  if (t.piece === 'straight' || ((t.piece === 't' || t.piece === 'cross') && throughAxis)) {
+    const [ax, az] = throughAxis!
     const px = -az, pz = ax
     const along = (u - 0.5) * TILE
     const off = S_AMP * Math.sin(2 * Math.PI * u)
@@ -130,7 +140,7 @@ export function parseMap(): ParsedMap {
   const W = Math.max(...grid.map((r) => r.length))
   const at = (gx: number, gz: number): string =>
     gz >= 0 && gz < H && gx >= 0 && gx < (grid[gz]?.length ?? 0) ? grid[gz][gx] : '.'
-  const isRoad = (c: string) => c === 'v' || c === 'e' || c === 'p' || c === 'w'
+  const isRoad = (c: string) => c === 'v' || c === 'e' || c === 'p' || c === 'w' || c === 'h'
 
   const tiles: RoadTile[] = []
   const tileMap = new Map<string, RoadTile>()
@@ -231,6 +241,11 @@ export function parseMap(): ParsedMap {
       }
       return d < ROAD_HALF ? 'dirt' : 'offroad'
     }
+    if (tile.zone === 'h') {
+      if (d < HWY_HALF) return 'asphalt'
+      if (d < HWY_EDGE) return 'curb'
+      return 'offroad'
+    }
     if (d < ROAD_HALF) return 'asphalt'
     if (d < CURB_HALF) return 'curb'
     return 'offroad'
@@ -252,7 +267,9 @@ export function parseMap(): ParsedMap {
       if (cur.dirs.s) nb.push(tileMap.get(cur.gx + ',' + (cur.gz + 1))!)
       if (cur.dirs.e) nb.push(tileMap.get(cur.gx + 1 + ',' + cur.gz)!)
       if (cur.dirs.w) nb.push(tileMap.get(cur.gx - 1 + ',' + cur.gz)!)
-      const next = nb.filter(Boolean).find((t) => t !== prev)
+      // highway tiles branch off the loop at T junctions — the walk must never
+      // wander down the branch or the AI ring and elevation profile both break
+      const next = nb.filter(Boolean).find((t) => t !== prev && t.zone !== 'h')
       prev = cur
       cur = next === start ? undefined : next
     }
@@ -361,6 +378,43 @@ export function parseMap(): ParsedMap {
     return { hx: lx + Math.sin(rot) * LAMP_ARM, hz: lz + Math.cos(rot) * LAMP_ARM, rot }
   }
 
+  // sign variants: 0=SL25, 1=SL55, 2=Stop, 3=Crossing (client maps variant → GLB)
+  // one cone on the inside curb at a corner's apex — marks the clipping point
+  // without ever sitting on the asphalt itself
+  // a row of cones (roadworks dressing): n cones from (x0,z0) stepping (dx,dz).
+  // One colour per row, tiny per-cone rotation scatter. No colliders — the client
+  // knockdown physics (fx/cones.ts) makes them puntable instead of solid.
+  const coneRow = (x0: number, z0: number, dx: number, dz: number, n: number, gx: number, gz: number, salt: number): void => {
+    for (let i = 0; i < n; i++) {
+      props.push({
+        kind: 'cone',
+        x: x0 + dx * i,
+        z: z0 + dz * i,
+        rot: hash2(gx, gz, salt + i) * Math.PI,
+        variant: Math.floor(hash2(gx, gz, salt) * 2),
+      })
+    }
+  }
+
+  const apexCone = (t: RoadTile, salt: number): void => {
+    const arms: Array<[number, number]> = []
+    if (t.dirs.n) arms.push([0, -1])
+    if (t.dirs.w) arms.push([-1, 0])
+    if (t.dirs.s) arms.push([0, 1])
+    if (t.dirs.e) arms.push([1, 0])
+    const cx = t.x + (arms[0][0] + arms[1][0]) * (TILE / 2)
+    const cz = t.z + (arms[0][1] + arms[1][1]) * (TILE / 2)
+    const dl = Math.hypot(t.x - cx, t.z - cz) || 1
+    const r = TILE / 2 - ROAD_HALF - 0.8 // just inside the inner asphalt edge
+    props.push({
+      kind: 'cone',
+      x: cx + ((t.x - cx) / dl) * r,
+      z: cz + ((t.z - cz) / dl) * r,
+      rot: hash2(t.gx, t.gz, salt) * Math.PI,
+      variant: Math.floor(hash2(t.gx, t.gz, salt + 1) * 2),
+    })
+  }
+
   let lampAlt = 0
   for (const t of tiles) {
     const along = t.dirs.n || t.dirs.s ? 'ns' : 'ew' // dominant axis for straights
@@ -375,6 +429,23 @@ export function parseMap(): ParsedMap {
         const head = lampHead(lx, lz, t.x, t.z)
         lamps.push({ x: head.hx, z: head.hz, color: SODIUM, radius: 13, intensity: 1.0, height: 5.2 })
         props.push({ kind: 'lampProp', x: lx, z: lz, rot: head.rot, variant: 0 })
+      }
+      // roadworks: the odd straight gets a short cone row ON THE PAVEMENT (never the
+      // asphalt — cones stay off the road; clipping the kerb is how you meet them)
+      if (t.piece === 'straight' && hash2(t.gx, t.gz, 140) < 0.25) {
+        const side = hash2(t.gx, t.gz, 141) < 0.5 ? 1 : -1
+        const inset = (ROAD_HALF + CURB_HALF) / 2 // middle of the walkway
+        if (along === 'ns') coneRow(t.x + side * inset, t.z - 3.9, 0, 2.6, 4, t.gx, t.gz, 142)
+        else coneRow(t.x - 3.9, t.z + side * inset, 2.6, 0, 4, t.gx, t.gz, 142)
+      }
+      // street furniture: sparse 25 limit / pedestrian-crossing signs on the verge
+      if (t.piece === 'straight' && hash2(t.gx, t.gz, 70) < 0.3) {
+        const side = hash2(t.gx, t.gz, 71) < 0.5 ? 1 : -1
+        const sx = along === 'ns' ? t.x + side * (CURB_HALF + 0.5) : t.x + 3.5
+        const sz = along === 'ns' ? t.z + 3.5 : t.z + side * (CURB_HALF + 0.5)
+        // plate faces down the road so approaching drivers read it
+        const rot = (along === 'ns' ? 0 : Math.PI / 2) + (side > 0 ? Math.PI : 0)
+        props.push({ kind: 'sign', x: sx, z: sz, rot, variant: hash2(t.gx, t.gz, 73) < 0.6 ? 0 : 3 })
       }
       // houses on open sides of straights
       if (t.piece === 'straight') {
@@ -421,14 +492,104 @@ export function parseMap(): ParsedMap {
         props.push({ kind: 'bush', x: tx, z: tz, rot: hash2(t.gx, t.gz, 55) * Math.PI * 2, variant: Math.floor(hash2(t.gx, t.gz, 56) * 8) })
       }
       // cones marking corner clipping points
+      if (t.piece === 'corner') apexCone(t, 7)
+      // T junction onto the highway: light the turn-off so it reads at night
+      if (t.piece === 't') {
+        const lx = t.x + (t.dirs.e && t.dirs.w ? 0 : CURB_HALF - 0.8) * (t.dirs.e ? -1 : 1)
+        const lz = t.z + (t.dirs.e && t.dirs.w ? CURB_HALF - 0.8 : 0)
+        const head = lampHead(lx, lz, t.x, t.z)
+        lamps.push({ x: head.hx, z: head.hz, color: SODIUM, radius: 13, intensity: 1.05, height: 5.2 })
+        props.push({ kind: 'lampProp', x: lx, z: lz, rot: head.rot, variant: 0 })
+      }
+    }
+
+    if (t.zone === 'h') {
+      // cool-white highway lighting, one side, every 3rd tile
+      if (t.piece === 'straight' && (t.gx + t.gz) % 3 === 0) {
+        const lx = along === 'ns' ? t.x + (HWY_EDGE + 1.0) : t.x
+        const lz = along === 'ns' ? t.z : t.z + (HWY_EDGE + 1.0)
+        const head = lampHead(lx, lz, t.x, t.z)
+        lamps.push({ x: head.hx, z: head.hz, color: COOLWHITE, radius: 16, intensity: 0.95, height: 6.0 })
+        props.push({ kind: 'lampProp', x: lx, z: lz, rot: head.rot, variant: 1 })
+      }
+      // every corner gets a lamp on the outside of the turn — the bend has to read
+      // from a car arriving at highway speed
       if (t.piece === 'corner') {
-        props.push({ kind: 'cone', x: t.x + (hash2(t.gx, t.gz, 7) - 0.5) * 3, z: t.z + (hash2(t.gx, t.gz, 8) - 0.5) * 3, rot: hash2(t.gx, t.gz, 9) * Math.PI, variant: 0 })
+        const ix = (t.dirs.e ? 1 : 0) - (t.dirs.w ? 1 : 0)
+        const iz = (t.dirs.s ? 1 : 0) - (t.dirs.n ? 1 : 0)
+        const lx = t.x - ix * TILE * 0.38
+        const lz = t.z - iz * TILE * 0.38
+        const head = lampHead(lx, lz, t.x, t.z)
+        lamps.push({ x: head.hx, z: head.hz, color: COOLWHITE, radius: 16, intensity: 1.0, height: 6.0 })
+        props.push({ kind: 'lampProp', x: lx, z: lz, rot: head.rot, variant: 1 })
+      }
+      // roadworks staged on the verge: a cone row angling in toward (but never onto)
+      // the shoulder — reads as work-ahead at highway speed, sits entirely on grass
+      if (t.piece === 'straight' && hash2(t.gx, t.gz, 145) < 0.35) {
+        const side = hash2(t.gx, t.gz, 146) < 0.5 ? 1 : -1
+        for (let i = 0; i < 5; i++) {
+          const lat = side * (HWY_EDGE + 2.6 - i * 0.45) // grass verge, easing toward the edge
+          const lon = -6.2 + i * 3.1
+          props.push({
+            kind: 'cone',
+            x: along === 'ns' ? t.x + lat : t.x + lon,
+            z: along === 'ns' ? t.z + lon : t.z + lat,
+            rot: hash2(t.gx, t.gz, 147 + i) * Math.PI,
+            variant: Math.floor(hash2(t.gx, t.gz, 148) * 2),
+          })
+        }
+      }
+      // 55 limit signs spaced down the straights
+      if (t.piece === 'straight' && hash2(t.gx, t.gz, 74) < 0.3) {
+        const side = hash2(t.gx, t.gz, 75) < 0.5 ? 1 : -1
+        const sx = along === 'ns' ? t.x + side * (HWY_EDGE + 0.7) : t.x - 3.5
+        const sz = along === 'ns' ? t.z - 3.5 : t.z + side * (HWY_EDGE + 0.7)
+        const rot = (along === 'ns' ? 0 : Math.PI / 2) + (side > 0 ? Math.PI : 0)
+        props.push({ kind: 'sign', x: sx, z: sz, rot, variant: 1 })
+      }
+      // roadside houses on the outer ring of the circuit (away from the gazebo
+      // pocket), set further back than village houses — farmstead spacing
+      if (t.piece === 'straight' && hash2(t.gx, t.gz, 80) < 0.6) {
+        const side = along === 'ns' ? 1 : t.z < 4.5 * TILE ? -1 : 1
+        const dist = HWY_EDGE + 9.5 + hash2(t.gx, t.gz, 81) * 4
+        const hx = along === 'ns' ? t.x + side * dist : t.x + (hash2(t.gx, t.gz, 82) - 0.5) * 5
+        const hz = along === 'ns' ? t.z + (hash2(t.gx, t.gz, 83) - 0.5) * 5 : t.z + side * dist
+        let ok = true
+        for (const [ox, oz] of [[0, 0], [5, 0], [-5, 0], [0, 5], [0, -5]] as const) {
+          if (surfaceAt(hx + ox, hz + oz) !== 'offroad') { ok = false; break }
+        }
+        if (ok) {
+          const rot = along === 'ns' ? (side > 0 ? -Math.PI / 2 : Math.PI / 2) : side > 0 ? Math.PI : 0
+          props.push({ kind: 'house', x: hx, z: hz, rot, variant: Math.floor(hash2(t.gx, t.gz, 84) * 15) })
+          colliders.push(box(hx, hz, along === 'ns' ? 5.0 : 4.5, along === 'ns' ? 4.5 : 5.0))
+          // yard trees + a bush or two around each farmstead
+          for (let gt = 0; gt < 3; gt++) {
+            const ang = hash2(t.gx + gt, t.gz, 85) * Math.PI * 2
+            const rad = 7.5 + hash2(t.gx, t.gz + gt, 86) * 5
+            const tx2 = hx + Math.cos(ang) * rad
+            const tz2 = hz + Math.sin(ang) * rad
+            if (!clearOfRoad(tx2, tz2)) continue
+            const big = hash2(t.gx, t.gz + gt, 87) < 0.35
+            props.push({ kind: big ? 'tree_big' : hash2(t.gx + gt, t.gz, 88) < 0.5 ? 'tree_small' : 'bush', x: tx2, z: tz2, rot: hash2(t.gx, t.gz, 89 + gt) * Math.PI * 2, variant: Math.floor(hash2(t.gx + gt, t.gz, 90) * 8) })
+            if (big) colliders.push(box(tx2, tz2, 0.7, 0.7))
+          }
+        }
+      }
+      // verge bushes close to the shoulder, both sides
+      for (const side of [-1, 1]) {
+        if (hash2(t.gx, t.gz, side + 100) > 0.55) continue
+        const dist = HWY_EDGE + 2.5 + hash2(t.gx, t.gz, side + 101) * 6
+        const bx = along === 'ns' ? t.x + side * dist : t.x + (hash2(t.gx, t.gz, side + 102) - 0.5) * TILE * 0.8
+        const bz = along === 'ns' ? t.z + (hash2(t.gx, t.gz, side + 103) - 0.5) * TILE * 0.8 : t.z + side * dist
+        if (!clearOfRoad(bx, bz)) continue
+        props.push({ kind: 'bush', x: bx, z: bz, rot: hash2(t.gx, t.gz, side + 104) * Math.PI * 2, variant: Math.floor(hash2(t.gx, t.gz, side + 105) * 8) })
       }
     }
 
     if (t.zone === 'p') {
-      // cool-white lamps, sparse; low fences along the fields
-      if ((t.gx + t.gz) % 3 === 0) {
+      // cool-white lamps, sparse; straights only — on corners the 'ns' offset lands
+      // exactly on the road arc (a pole in the middle of the dirt road)
+      if (t.piece === 'straight' && (t.gx + t.gz) % 3 === 0) {
         const lx = t.x + (along === 'ns' ? 8.6 : 0)
         const lz = t.z + (along === 'ns' ? 0 : 8.6)
         const head = lampHead(lx, lz, t.x, t.z)
@@ -466,15 +627,19 @@ export function parseMap(): ParsedMap {
     }
   }
 
-  // one lonely sodium lamp mid-forest (the halfway beacon)
+  // one lonely sodium lamp mid-forest (the halfway beacon) — offset PERPENDICULAR
+  // to the road axis (a fixed +x offset put the pole on the centerline of the
+  // east-west bottom straight), and clear of the dirt ribbon
   const forestTiles = tiles.filter((t) => t.zone === 'w' && t.piece === 'straight')
   if (forestTiles.length) {
     const mid = forestTiles[Math.floor(forestTiles.length / 2)]
     {
-      const lx = mid.x + CURB_HALF - 0.8
-      const head = lampHead(lx, mid.z, mid.x, mid.z)
+      const off = CURB_HALF + 0.5
+      const lx = mid.dirs.n || mid.dirs.s ? mid.x + off : mid.x
+      const lz = mid.dirs.n || mid.dirs.s ? mid.z : mid.z + off
+      const head = lampHead(lx, lz, mid.x, mid.z)
       lamps.push({ x: head.hx, z: head.hz, color: SODIUM, radius: 12, intensity: 1.1, height: 5.2 })
-      props.push({ kind: 'lampProp', x: lx, z: mid.z, rot: head.rot, variant: 0 })
+      props.push({ kind: 'lampProp', x: lx, z: lz, rot: head.rot, variant: 0 })
     }
   }
 
@@ -484,6 +649,44 @@ export function parseMap(): ParsedMap {
     const c = cornerTiles[cornerTiles.length - 1]
     props.push({ kind: 'tower', x: c.x + TILE * 0.9, z: c.z - TILE * 0.9, rot: 0, variant: 0 })
     colliders.push(box(c.x + TILE * 0.9, c.z - TILE * 0.9, 2.5, 2.5))
+  }
+
+  // stop signs where the highway meets the loop: on the highway tile adjacent to
+  // each junction, right-hand side of traffic approaching it, facing that traffic
+  for (const t of tiles) {
+    if (t.zone !== 'h') continue
+    const dirVecs = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0] } as const
+    for (const d of ['n', 's', 'e', 'w'] as const) {
+      if (!t.dirs[d]) continue
+      const [dx, dz] = dirVecs[d]
+      const nbr = tileMap.get(t.gx + dx + ',' + (t.gz + dz))
+      if (!nbr || nbr.zone === 'h') continue
+      const yaw = Math.atan2(dx, dz) // heading toward the junction
+      const rx = Math.cos(yaw), rz = -Math.sin(yaw) // right-of-travel
+      props.push({
+        kind: 'sign',
+        x: t.x + dx * (TILE / 2 - 2.0) + rx * (HWY_EDGE + 0.7),
+        z: t.z + dz * (TILE / 2 - 2.0) + rz * (HWY_EDGE + 0.7),
+        rot: Math.atan2(-dx, -dz), // plate faces the approaching car
+        variant: 2,
+      })
+    }
+  }
+
+  // gazebo landmark in the pocket the highway wraps around — a lit destination
+  // visible from three sides of the new circuit
+  {
+    const gzx = 15.5 * TILE, gzz = 4.5 * TILE
+    props.push({ kind: 'gazebo', x: gzx, z: gzz, rot: 0, variant: 0 })
+    colliders.push(box(gzx, gzz, 2.4, 2.4))
+    const head = lampHead(gzx + 5.5, gzz, gzx, gzz)
+    lamps.push({ x: head.hx, z: head.hz, color: SODIUM, radius: 12, intensity: 1.0, height: 5.2 })
+    props.push({ kind: 'lampProp', x: gzx + 5.5, z: gzz, rot: head.rot, variant: 0 })
+    // a couple of cars pulled off by the gazebo — somebody's already parked up here
+    for (const [i, [px, pz, pr]] of ([[gzx + 2.5, gzz + 10.5, Math.PI / 2 + 0.15], [gzx + 8.5, gzz + 9.0, Math.PI / 2 - 0.2]] as const).entries()) {
+      props.push({ kind: 'parked', x: px, z: pz, rot: pr, variant: 1 + i })
+      colliders.push(box(px, pz, 2.3, 1.0))
+    }
   }
 
   // --- vegetation scatter: density-field driven so some areas are thick woods and
@@ -509,6 +712,31 @@ export function parseMap(): ParsedMap {
     const kind = bushOnly ? 'bush' : r < 0.2 ? 'tree_big' : r < 0.38 ? 'tree_small' : 'bush'
     props.push({ kind, x, z, rot: hash2(i, 94) * Math.PI * 2, variant: Math.floor(hash2(i, 95) * 12) })
     if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
+  }
+
+  // densify the NE quarter around the highway — the global density field can leave
+  // the new circuit's surroundings bare; keep the gazebo clearing open and stay off
+  // the farmstead yards
+  {
+    const houses = props.filter((p) => p.kind === 'house')
+    const x0 = 10.5 * TILE, x1 = 22.5 * TILE
+    const z0 = 0.5 * TILE, z1 = 7.6 * TILE
+    for (let i = 0; i < 900; i++) {
+      const x = x0 + hash2(i, 301) * (x1 - x0)
+      const z = z0 + hash2(i, 302) * (z1 - z0)
+      if (hash2(i, 303) > 0.5) continue
+      if (!clearOfRoad(x, z)) continue
+      if ((x - 15.5 * TILE) ** 2 + (z - 4.5 * TILE) ** 2 < 9 * 9) continue // gazebo clearing
+      let nearHouse = false
+      for (const h of houses) {
+        if ((x - h.x) ** 2 + (z - h.z) ** 2 < 8 * 8) { nearHouse = true; break }
+      }
+      if (nearHouse) continue
+      const r = hash2(i, 304)
+      const kind = r < 0.22 ? 'tree_big' : r < 0.45 ? 'tree_small' : 'bush'
+      props.push({ kind, x, z, rot: hash2(i, 305) * Math.PI * 2, variant: Math.floor(hash2(i, 306) * 12) })
+      if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
+    }
   }
 
   // perimeter forest: rings of trees just outside the playable grid — fills the
@@ -554,7 +782,7 @@ export function parseMap(): ParsedMap {
     const gz = Math.round(z / TILE)
     const t = tileMap.get(gx + ',' + gz)
     if (!t) return 0.6
-    return t.zone === 'p' ? 1.0 : t.zone === 'w' ? 0.8 : t.zone === 'e' ? 0.4 : 0.25
+    return t.zone === 'p' ? 1.0 : t.zone === 'w' ? 0.8 : t.zone === 'e' ? 0.4 : t.zone === 'h' ? 0.5 : 0.25
   }
 
   return {

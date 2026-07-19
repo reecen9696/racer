@@ -67,8 +67,12 @@ const TILE_SAMPLES = 5 // per tile — corners are quarter arcs, so straight-lin
 // tile-center + midpoint, which cuts every corner diagonally and throws the cop
 // into the hedge at patrol speed. T/cross tiles have >2 arms and no single arc, so
 // they keep the center+midpoint treatment.
-export function buildPatrolPath(map: ParsedMap): Waypoint[] {
-  const tiles: RoadTile[] = map.loopOrder
+//
+// `reverse` walks the loop the other way round. The offset is always applied to the
+// right of TRAVEL, so reversing the tile order lands the lane on the physically opposite
+// side of the road automatically — that's oncoming traffic, no separate geometry needed.
+export function buildPatrolPath(map: ParsedMap, reverse = false): Waypoint[] {
+  const tiles: RoadTile[] = reverse ? [...map.loopOrder].reverse() : map.loopOrder
   const out: Waypoint[] = []
   const n = tiles.length
   const offset = (x: number, z: number, h: number): Waypoint => ({
@@ -80,7 +84,11 @@ export function buildPatrolPath(map: ParsedMap): Waypoint[] {
     const next = tiles[(i + 1) % n]
     const h = Math.atan2(next.x - t.x, next.z - t.z)
 
-    if (t.piece === 'straight' || t.piece === 'corner') {
+    // T junctions the loop passes straight through (highway turn-offs) sample the
+    // centerline like any straight — dirtCenterlinePoint routes them on the through axis
+    const throughT =
+      (t.piece === 't' || t.piece === 'cross') && ((t.dirs.n && t.dirs.s) || (t.dirs.e && t.dirs.w))
+    if (t.piece === 'straight' || t.piece === 'corner' || throughT) {
       // the centerline's own u direction is arbitrary — walk it whichever way
       // actually heads toward the next tile
       const [x0, z0] = dirtCenterlinePoint(t, 0)
@@ -181,6 +189,21 @@ export function stepCopBrain(
     if (brain.cooldownT <= 0) brain.mode = 'patrol'
   }
 
+  // --- what's in his lane ---
+  // Computed up here, not down in the patrol block, because being stopped behind a car
+  // has to be distinguishable from being STUCK. Without that distinction he pulls up
+  // behind a parked driver, the reverse-recovery decides he's wedged, backs him up and
+  // drives him forward again — straight into the bumper he'd just correctly stopped for.
+  const onPatrol = brain.mode === 'patrol' || brain.mode === 'cooldown'
+  const laneAhead = onPatrol
+    ? carAhead(cop, traffic?.size ? new Map([...players, ...traffic]) : players, 26, {
+        path: brain.path,
+        from: brain.wpIndex,
+      })
+    : null
+  const laneSpeed = laneAhead ? followSpeed(cop, laneAhead) : Infinity
+  const yielding = laneSpeed < PATROL_SPEED - 0.5
+
   // --- wedge watchdog ---
   // Measured on REAL DISPLACEMENT, not the waypoint index. The index is worthless
   // here: `reached()` also accepts a waypoint that's merely *behind* him, so a cop
@@ -197,7 +220,9 @@ export function stepCopBrain(
   // ALREADY slow. Keying it off distance alone (PIN_DIST*3 = 27m) would exempt a cop
   // wedged anywhere near a fleeing driver and hand back the stuck-forever bug.
   const tgt = brain.mode === 'pursuit' ? players.get(brain.targetId) : undefined
-  const holding = brain.pinT > 0 || (!!tgt && nearest < PIN_DIST + 4 && Math.abs(tgt.speed) < TARGET_STOP_V)
+  // `yielding` counts as holding: waiting behind stopped traffic is the correct thing
+  // to be doing, and letting the watchdog run there teleports him out of a queue.
+  const holding = yielding || brain.pinT > 0 || (!!tgt && nearest < PIN_DIST + 4 && Math.abs(tgt.speed) < TARGET_STOP_V)
   if (holding) {
     brain.wedgeT = 0
     brain.lastX = cop.x
@@ -358,20 +383,28 @@ export function stepCopBrain(
     curve += Math.abs(wrapAngle(h - prevH))
     prevH = h
   }
-  let targetSpeed = PATROL_SPEED * clamp(1 - curve * 0.3, 0.42, 1)
-  // Off duty he shares the lane with the civilians, and he patrols faster than they
-  // drive — without this he simply drives through the back of the traffic he's
-  // supposed to be policing. Pursuit deliberately skips this: nothing yields mid-chase.
-  if (traffic?.size) {
-    const ob = carAhead(cop, traffic)
-    if (ob) targetSpeed = Math.min(targetSpeed, followSpeed(cop, ob))
-  }
+  // Off duty he shares the lane with everyone else, and he patrols faster than the
+  // civilians drive — without this he simply drives through the back of the traffic he's
+  // supposed to be policing, and rear-ends any player pootling along in front of him.
+  // Players count here as well as civilians: running into the back of you at 47 km/h is
+  // exactly the kind of contact that then makes it YOUR problem, since a hard enough
+  // knock trips onCopHit and he pursues you for a collision he caused. `laneAhead` is
+  // null in pursuit — nothing yields mid-chase, least of all to the car he's chasing.
+  const targetSpeed = Math.min(PATROL_SPEED * clamp(1 - curve * 0.3, 0.42, 1), laneSpeed)
 
   const aim = pointAhead(brain.path, brain.wpIndex, cop, clamp(5 + Math.abs(cop.speed) * 0.85, 6, 20))
   input.steer = steerToward(cop, aim.x, aim.z)
   const sc = speedControl(cop, targetSpeed)
   input.throttle = sc.throttle
   input.brake = sc.brake
+  // Same standstill creep the civilians have: speedControl's 0.15 coast term dribbles him
+  // forward at a rate too small to see and large enough to close the gap over a long wait,
+  // and the village's slopes roll him on top of that. Hold the car instead.
+  if (targetSpeed < 0.5) input.throttle = 0
+  if (laneAhead && laneAhead.gap < 4 && cop.speed > 0.05) {
+    input.throttle = 0
+    input.brake = cop.speed > 0.5 ? 1 : 0.5
+  }
   return { input, pinnedNow: false }
 }
 

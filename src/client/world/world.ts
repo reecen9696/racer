@@ -9,9 +9,21 @@ import { patchMaterial, psxTexture } from '../renderer/patch'
 // Night ambient: never pure black — everything silhouettes against the sky.
 const AMBIENT = new THREE.Color(0.64, 0.68, 0.86)
 
+// one instanced prop (e.g. a bush) with handles to every InstancedMesh slice of it —
+// fx code hides/regrows it by rescaling `orig` and rewriting the instance matrix
+export interface InstancedProp {
+  x: number
+  z: number
+  parts: { inst: THREE.InstancedMesh; index: number; orig: THREE.Matrix4 }[]
+}
+
 export class World {
   group = new THREE.Group()
   map: ParsedMap
+  // individually-placed cone wrappers, consumed by fx/cones.ts knockdown physics
+  cones: { wrapper: THREE.Group; x: number; z: number; rot: number }[] = []
+  // every bush instance, consumed by fx/bushes.ts (explode on hit, regrow later)
+  bushes: InstancedProp[] = []
 
   constructor(map: ParsedMap) {
     this.map = map
@@ -104,14 +116,9 @@ export class World {
     this.group.add(ground)
   }
 
-  private pieceFile(piece: RoadTile['piece']): string {
-    switch (piece) {
-      case 'straight': return 'Road_Straight.glb'
-      case 'corner': return 'Road_Corner.glb'
-      case 't': return 'Road_T.glb'
-      case 'cross': return 'Road_Cross.glb'
-      case 'end': return 'Road_End.glb'
-    }
+  private pieceFile(piece: RoadTile['piece'], highway = false): string {
+    const name = { straight: 'Straight', corner: 'Corner', t: 'T', cross: 'Cross', end: 'End' }[piece]
+    return (highway ? 'Highway_' : 'Road_') + name + '.glb'
   }
 
   // Rotation offset between our neighbor-inference convention and how each GLB is
@@ -130,18 +137,25 @@ export class World {
     straight: [TILE / 13.0, 1, 1],
   }
 
+  // Highway_* pieces use a 24.29 m pitch — scaled down to the road grid they still
+  // read clearly wider than the village road (asphalt ~15.5 m vs ~10 m).
+  static HWY_SCALE = TILE / 24.29
+
   private async buildRoads(): Promise<void> {
     this.buildDirtRoad()
     const byPiece = new Map<string, RoadTile[]>()
     for (const t of this.map.tiles) {
       if (t.dirt) continue // elevated section is the draped dirt ribbon instead
-      const arr = byPiece.get(t.piece) ?? []
+      const key = (t.zone === 'h' ? 'h:' : '') + t.piece
+      const arr = byPiece.get(key) ?? []
       arr.push(t)
-      byPiece.set(t.piece, arr)
+      byPiece.set(key, arr)
     }
     const tint = new THREE.Color()
-    for (const [piece, tiles] of byPiece) {
-      const model = await loadGLB('/assets/roads/' + this.pieceFile(piece as RoadTile['piece']))
+    for (const [key, tiles] of byPiece) {
+      const highway = key.startsWith('h:')
+      const piece = (highway ? key.slice(2) : key) as RoadTile['piece']
+      const model = await loadGLB('/assets/roads/' + this.pieceFile(piece, highway))
       // The pack's GLB nodes carry a scene-layout translation (e.g. x≈163, y≈-0.31);
       // recenter the whole piece so its footprint center sits on the tile center at y≈0.
       const bbox = new THREE.Box3().setFromObject(model.object)
@@ -152,7 +166,10 @@ export class World {
         const m = new THREE.Matrix4()
         const q = new THREE.Quaternion()
         const up = new THREE.Vector3(0, 1, 0)
-        const ps = World.PIECE_SCALE[piece] ?? [1, 1, 1]
+        const hs = World.HWY_SCALE
+        const ps = highway
+          ? piece === 'straight' ? [TILE / 13.0, 1, hs] : [hs, 1, hs]
+          : World.PIECE_SCALE[piece] ?? [1, 1, 1]
         const qSlope = new THREE.Quaternion()
         tiles.forEach((t, i) => {
           q.setFromAxisAngle(up, t.rot + World.ROT_FIX[piece])
@@ -221,8 +238,9 @@ export class World {
     model: LoadedModel,
     props: Prop[],
     opts: { targetHeight?: number; targetWidth?: number; targetSize?: { x?: number; y?: number; z?: number }; tintAmbient?: number; tint?: boolean } = {},
-  ): void {
-    if (!props.length) return
+  ): THREE.Group[] {
+    const out: THREE.Group[] = []
+    if (!props.length) return out
     const bbox = new THREE.Box3().setFromObject(model.object)
     const size = bbox.getSize(new THREE.Vector3())
     const center = bbox.getCenter(new THREE.Vector3())
@@ -261,7 +279,9 @@ export class World {
         })
       }
       this.group.add(wrapper)
+      out.push(wrapper)
     }
+    return out
   }
 
   // Instanced variant of placeClones for high-count vegetation: one InstancedMesh
@@ -269,9 +289,13 @@ export class World {
   private placeInstanced(
     model: LoadedModel,
     props: Prop[],
-    opts: { targetHeight?: number; targetWidth?: number; tintAmbient?: number } = {},
+    opts: { targetHeight?: number; targetWidth?: number; tintAmbient?: number; collectInto?: InstancedProp[] } = {},
   ): void {
     if (!props.length) return
+    // registry entries so fx code can hide/regrow individual instances later
+    const collected: InstancedProp[] | null = opts.collectInto ?? null
+    const entries: InstancedProp[] = props.map((p) => ({ x: p.x, z: p.z, parts: [] }))
+    if (collected) collected.push(...entries)
     const bbox = new THREE.Box3().setFromObject(model.object)
     const size = bbox.getSize(new THREE.Vector3())
     const center = bbox.getCenter(new THREE.Vector3())
@@ -298,6 +322,7 @@ export class World {
         inst.setMatrixAt(i, m)
         this.lampTintAt(p.x, p.z, tint, opts.tintAmbient ?? 1)
         inst.setColorAt(i, tint)
+        if (collected) entries[i].parts.push({ inst, index: i, orig: m.clone() })
       })
       inst.instanceMatrix.needsUpdate = true
       if (inst.instanceColor) inst.instanceColor.needsUpdate = true
@@ -469,7 +494,7 @@ export class World {
         } catch { /* variant may not exist */ }
       }
       for (let i = 0; i < bushModels.length; i++) {
-        this.placeInstanced(bushModels[i], bushes.filter((p) => p.variant % bushModels.length === i), { targetHeight: 1.1 })
+        this.placeInstanced(bushModels[i], bushes.filter((p) => p.variant % bushModels.length === i), { targetHeight: 1.1, collectInto: this.bushes })
       }
     })())
 
@@ -481,6 +506,53 @@ export class World {
       const model2 = await loadGLB('/assets/nature/rocks/rock_grassy.glb')
       this.placeInstanced(model, rocks.filter((r) => r.variant === 0), { targetWidth: 2.2 })
       this.placeInstanced(model2, rocks.filter((r) => r.variant === 1), { targetWidth: 2.2 })
+    })())
+
+    // traffic signs: variant → GLB (0=SL25, 1=SL55, 2=Stop, 3=Crossing); pack scale
+    // is already real-world (~2.1 m), so no target sizing
+    jobs.push((async () => {
+      const signs = P.filter((p) => p.kind === 'sign')
+      if (!signs.length) return
+      const files = ['Sign_SL25', 'Sign_SL55', 'Sign_Stop', 'Sign_Crossing']
+      for (let v = 0; v < files.length; v++) {
+        const sel = signs.filter((p) => p.variant === v)
+        if (!sel.length) continue
+        try {
+          const model = await loadGLB(`/assets/roads/Signs/${files[v]}.glb`)
+          // pack authors the plate 90° off our facing convention (rot = yaw the plate faces)
+          model.object.rotation.y = Math.PI / 2
+          this.placeClones(model, sel, { tintAmbient: 1.15 })
+        } catch (e) {
+          console.warn('sign load failed', files[v], e)
+        }
+      }
+    })())
+
+    // traffic cones at corner apexes (two color variants in the pack) — wrappers are
+    // kept in this.cones so the client-side knockdown physics (fx/cones.ts) can punt them
+    jobs.push((async () => {
+      const cones = P.filter((p) => p.kind === 'cone')
+      if (!cones.length) return
+      for (const v of [0, 1]) {
+        const sel = cones.filter((p) => p.variant % 2 === v)
+        if (!sel.length) continue
+        const model = await loadGLB(`/assets/roads/Traffic_Cone_${v + 1}.glb`)
+        const wrappers = this.placeClones(model, sel, { tintAmbient: 1.2 })
+        sel.forEach((p, i) => this.cones.push({ wrapper: wrappers[i], x: p.x, z: p.z, rot: p.rot }))
+      }
+    })())
+
+    // gazebo landmark (shares the landmarks texture atlas with the tower)
+    jobs.push((async () => {
+      const gazebos = P.filter((p) => p.kind === 'gazebo')
+      if (!gazebos.length) return
+      try {
+        const tex = await loadTexture('/assets/landmarks/tex/textures.png')
+        const model = await loadFBX('/assets/landmarks/gazebo.fbx', tex)
+        this.placeClones(model, gazebos, { targetHeight: 5.0, tintAmbient: 0.9 })
+      } catch (e) {
+        console.warn('gazebo load failed', e)
+      }
     })())
 
     // the tower landmark (church/water-tower silhouette, one lit window via sprite later)

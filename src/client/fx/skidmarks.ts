@@ -1,8 +1,19 @@
-// Skidmarks: dark decal quads laid along the drift path in a ring buffer.
-// Persistent evidence of a good run (Part 1 §5.6).
+// Ground marks laid along the driving path in a big ring buffer — black rubber on
+// asphalt, crushed-grass tracks on the lawns. Persistent evidence of a good run
+// (Part 1 §5.6): the buffer holds kilometres of marks before the oldest recycle.
 import * as THREE from 'three'
 
-const MAX_QUADS = 2400 // per instance (both rear wheels share)
+export interface SkidStyle {
+  color: [number, number, number]
+  width: number // half-width of each tire stripe (m)
+  maxQuads: number
+  alphaCap: number
+  y: number // lift above ground to dodge z-fighting
+}
+
+export const RUBBER: SkidStyle = { color: [0.015, 0.015, 0.02], width: 0.14, maxQuads: 12000, alphaCap: 0.55, y: 0.025 }
+// crushed grass reads LIGHTER than the lawn around it
+export const GRASS: SkidStyle = { color: [0.42, 0.58, 0.33], width: 0.19, maxQuads: 12000, alphaCap: 0.4, y: 0.02 }
 
 export class Skidmarks {
   mesh: THREE.Mesh
@@ -12,15 +23,18 @@ export class Skidmarks {
   private head = 0
   private lastL: THREE.Vector3 | null = null
   private lastR: THREE.Vector3 | null = null
+  private style: SkidStyle
 
-  constructor() {
+  constructor(style: SkidStyle = RUBBER) {
+    this.style = style
     this.geo = new THREE.BufferGeometry()
-    this.positions = new Float32Array(MAX_QUADS * 6 * 3)
-    this.alphas = new Float32Array(MAX_QUADS * 6)
+    this.positions = new Float32Array(style.maxQuads * 6 * 3)
+    this.alphas = new Float32Array(style.maxQuads * 6)
     this.geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3).setUsage(THREE.DynamicDrawUsage))
     this.geo.setAttribute('aAlpha', new THREE.BufferAttribute(this.alphas, 1).setUsage(THREE.DynamicDrawUsage))
     this.geo.drawRange.count = 0
 
+    const [cr, cg, cb] = style.color
     const mat = new THREE.ShaderMaterial({
       vertexShader: /* glsl */ `
         attribute float aAlpha;
@@ -32,7 +46,7 @@ export class Skidmarks {
       fragmentShader: /* glsl */ `
         varying float vA;
         void main() {
-          gl_FragColor = vec4(0.02, 0.02, 0.03, vA);
+          gl_FragColor = vec4(${cr.toFixed(3)}, ${cg.toFixed(3)}, ${cb.toFixed(3)}, vA);
         }`,
       transparent: true,
       depthWrite: false,
@@ -42,7 +56,7 @@ export class Skidmarks {
     this.mesh.renderOrder = 1
   }
 
-  // called each physics step while drifting on asphalt with rear wheel world positions
+  // called each physics step with rear wheel world positions
   addSegment(rl: THREE.Vector3, rr: THREE.Vector3, strength: number): void {
     if (this.lastL && this.lastR) {
       this.pushQuad(this.lastL, rl, strength)
@@ -60,21 +74,21 @@ export class Skidmarks {
     const dx = b.x - a.x, dz = b.z - a.z
     const len = Math.hypot(dx, dz)
     if (len < 0.05 || len > 3) return
-    const w = 0.14
+    const w = this.style.width
     const nx = (-dz / len) * w, nz = (dx / len) * w
-    const y = 0.025
+    const y = this.style.y
     const i = this.head * 18
     const P = this.positions
     // two triangles
     const verts = [
-      a.x - nx, y, a.z - nz, a.x + nx, y, a.z + nz, b.x + nx, y, b.z + nz,
-      a.x - nx, y, a.z - nz, b.x + nx, y, b.z + nz, b.x - nx, y, b.z - nz,
+      a.x - nx, a.y + y, a.z - nz, a.x + nx, a.y + y, a.z + nz, b.x + nx, b.y + y, b.z + nz,
+      a.x - nx, a.y + y, a.z - nz, b.x + nx, b.y + y, b.z + nz, b.x - nx, b.y + y, b.z - nz,
     ]
     P.set(verts, i)
-    const alpha = Math.min(0.55, strength)
+    const alpha = Math.min(this.style.alphaCap, strength)
     this.alphas.fill(alpha, this.head * 6, this.head * 6 + 6)
-    this.head = (this.head + 1) % MAX_QUADS
-    this.geo.drawRange.count = Math.min(this.geo.drawRange.count + 6, MAX_QUADS * 6)
+    this.head = (this.head + 1) % this.style.maxQuads
+    this.geo.drawRange.count = Math.min(this.geo.drawRange.count + 6, this.style.maxQuads * 6)
     ;(this.geo.attributes.position as THREE.BufferAttribute).needsUpdate = true
     ;(this.geo.attributes.aAlpha as THREE.BufferAttribute).needsUpdate = true
   }

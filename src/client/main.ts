@@ -7,7 +7,9 @@ import { World } from './world/world'
 import { loadCar, loadPoliceCar, CarModel } from './world/assets'
 import { HeadlightRig, LightBar, buildLampGlows } from './fx/lights'
 import { SmokePool } from './fx/particles'
-import { Skidmarks } from './fx/skidmarks'
+import { ConePhysics, ConeHitter } from './fx/cones'
+import { Skidmarks, GRASS } from './fx/skidmarks'
+import { BushFx } from './fx/bushes'
 import { HUD } from './ui/hud'
 import { CopChat } from './ui/copchat'
 import { DebugPanel } from './ui/debug'
@@ -18,7 +20,7 @@ import { InputShaper, RawInput } from '../shared/input'
 import { TUNING, PHYS_DT, CAR_WIDTH, CAR_LENGTH } from '../shared/constants'
 import { makeScore, stepScore } from '../shared/scoring'
 import { NetClient, RemotePlayer } from './net/net'
-import { CARS, DEFAULT_CAR } from '../shared/cars'
+import { CARS, DEFAULT_CAR, carTuning } from '../shared/cars'
 import { PIN_TIME } from '../shared/police'
 
 // ---------- join screen ----------
@@ -112,6 +114,13 @@ async function boot(): Promise<void> {
   scene.add(smoke.group)
   const skids = new Skidmarks()
   scene.add(skids.mesh)
+  const grassTracks = new Skidmarks(GRASS)
+  scene.add(grassTracks.mesh)
+
+  // knockable traffic cones (client-side dressing physics — see fx/cones.ts)
+  const conePhys = new ConePhysics(world.cones, map.heightAt)
+  // destructible bushes: explode on contact, regrow later (fx/bushes.ts)
+  const bushFx = new BushFx(world.bushes)
 
   const hud = new HUD()
   const debug = new DebugPanel()
@@ -127,10 +136,15 @@ async function boot(): Promise<void> {
   const audio = new GameAudio()
   audio.init().catch((e) => console.warn('audio init failed', e))
 
+  // per-car physics: recomputed each frame so backtick-panel edits to the base
+  // TUNING flow through the multipliers live
+  let T = carTuning(chosenCar)
+
   // ---------- multiplayer ----------
   const net = new NetClient(map)
+  net.tuning = T
   const spawnQ = new URLSearchParams(location.search).get('spawn')?.split(',').map(Number)
-  const online = await net.connect(playerName, chosenCar, spawnQ?.[0], spawnQ?.[1])
+  const online = await net.connect(playerName, chosenCar, spawnQ?.[0], spawnQ?.[1], spawnQ?.[2])
   console.log('[net]', online ? 'connected to room' : 'offline single-player')
   net.onHorn = (id) => {
     const r = net.remotes.get(id)
@@ -253,8 +267,24 @@ async function boot(): Promise<void> {
   const spawnParam = new URLSearchParams(location.search).get('spawn')?.split(',').map(Number)
   const spawnX = spawnParam?.[0] ?? map.spawn.x
   const spawnZ = spawnParam?.[1] ?? map.spawn.z
-  const car = makeCarState(spawnX, spawnZ, map.spawn.yaw)
+  const car = makeCarState(spawnX, spawnZ, spawnParam?.[2] ?? map.spawn.yaw) // ?spawn=x,z[,yaw]
   net.getSpawn = () => ({ x: car.x, z: car.z })
+  // cone punt: a little thunk, louder the harder the hit, faded by distance (remote
+  // cars knock cones too — you hear theirs from across the road, not across the map)
+  conePhys.onHit = (speed, x, z) => {
+    const falloff = Math.max(0, 1 - Math.hypot(x - car.x, z - car.z) / 55)
+    if (falloff > 0.02) audio.crash(Math.min(1.6, 0.4 + speed * 0.07) * falloff)
+  }
+  // bush explosion: a burst of leafy green puffs + a soft rustle-thump
+  const leafTint = new THREE.Color(0.32, 0.52, 0.24)
+  bushFx.onExplode = (x, z, speed) => {
+    const hy = map.heightAt(x, z)
+    for (let i = 0; i < 10; i++) {
+      smoke.spawn(x + (Math.random() - 0.5) * 1.2, hy + 0.3 + Math.random() * 0.8, z + (Math.random() - 0.5) * 1.2, leafTint)
+    }
+    const falloff = Math.max(0, 1 - Math.hypot(x - car.x, z - car.z) / 55)
+    if (falloff > 0.02) audio.crash(Math.min(1.2, 0.3 + speed * 0.05) * falloff)
+  }
   // debug state readable from the extension's isolated world (DOM crosses, globals don't)
   setInterval(() => {
     document.body.dataset.dbg = JSON.stringify({
@@ -262,6 +292,7 @@ async function boot(): Promise<void> {
       raw: { ...raw }, surf: [car.surfFL, car.surfRL], wallHit: +car.wallHit.toFixed(2),
       x: +car.x.toFixed(1), z: +car.z.toFixed(1), yaw: +car.yaw.toFixed(2),
       slip: +car.slipAngle.toFixed(3),
+      cones: conePhys.downed(),
       draws: pipeline.renderer.info.render.calls, tris: pipeline.renderer.info.render.triangles,
       cop: (() => {
         const c = [...net.remotes.values()].find((r) => r.bot === 1)
@@ -358,9 +389,11 @@ async function boot(): Promise<void> {
 
     while (acc >= PHYS_DT) {
       acc -= PHYS_DT
+      T = carTuning(chosenCar)
+      net.tuning = T
       copyCarState(car, prev)
-      let steer = shaper.update(raw, car, TUNING, PHYS_DT)
-      let throttle = shaper.shapeThrottle(raw.throttle, TUNING, PHYS_DT)
+      let steer = shaper.update(raw, car, T, PHYS_DT)
+      let throttle = shaper.shapeThrottle(raw.throttle, T, PHYS_DT)
       let brake = raw.brake ? 1 : 0
       // autopilot yields the moment the player touches any control
       if (pilot && (raw.left || raw.right || raw.throttle || raw.brake || raw.handbrake)) pilot = false
@@ -422,7 +455,7 @@ async function boot(): Promise<void> {
         handbrake: frozen ? false : raw.handbrake,
         headlights,
       }
-      stepCar(car, shapedInput, TUNING, PHYS_DT, map.surfaceAt, map.colliders, map.heightAt)
+      stepCar(car, shapedInput, T, PHYS_DT, map.surfaceAt, map.colliders, map.heightAt)
       // bump against other cars (instant local feedback; server pass is authority)
       for (const r of net.remotes.values()) {
         collideCarKinematic(car, {
@@ -448,9 +481,10 @@ async function boot(): Promise<void> {
       const rearOn = car.surfRL !== 'offroad' && car.surfRR !== 'offroad'
       const fwdX = Math.sin(car.yaw), fwdZ = Math.cos(car.yaw)
       const rightX = Math.cos(car.yaw), rightZ = -Math.sin(car.yaw)
+      const b = TUNING.cgToRear * 0.9
+      const hy = map.heightAt(car.x, car.z)
       if ((sliding || burnout) && rearOn) {
-        const b = TUNING.cgToRear * 0.9
-        const hy = map.heightAt(car.x, car.z)
+        // black rubber on the hard stuff — permanent evidence of the drift
         skids.addSegment(
           new THREE.Vector3(car.x - fwdX * b - rightX * 0.8, hy, car.z - fwdZ * b - rightZ * 0.8),
           new THREE.Vector3(car.x - fwdX * b + rightX * 0.8, hy, car.z - fwdZ * b + rightZ * 0.8),
@@ -458,6 +492,17 @@ async function boot(): Promise<void> {
         )
       } else {
         skids.breakSegment()
+      }
+      // grass remembers EVERY pass, not just drifts: light crushed-grass tracks
+      // wherever the car drives on the lawns
+      if (car.surfRL === 'offroad' && car.surfRR === 'offroad' && Math.abs(car.speed) > 1.5) {
+        grassTracks.addSegment(
+          new THREE.Vector3(car.x - fwdX * b - rightX * 0.8, hy, car.z - fwdZ * b - rightZ * 0.8),
+          new THREE.Vector3(car.x - fwdX * b + rightX * 0.8, hy, car.z - fwdZ * b + rightZ * 0.8),
+          0.22 + Math.abs(car.slipAngle) * 0.5,
+        )
+      } else {
+        grassTracks.breakSegment()
       }
       if ((sliding || burnout) && seq % 2 === 0) {
         world.lampTintAt(car.x, car.z, tint, 0.8)
@@ -509,6 +554,22 @@ async function boot(): Promise<void> {
     PSX_UNIFORMS.uMist.value = debug.extras.mist * (0.4 + mist * 0.8)
 
     smoke.update(dt)
+
+    // cones: every car on the road can punt one — local car (true velocity) plus
+    // remotes (velocity reconstructed from interpolated heading × speed)
+    const hitters: ConeHitter[] = []
+    {
+      const fx = Math.sin(car.yaw), fz = Math.cos(car.yaw)
+      for (const s of [1.1, -1.1]) hitters.push({ x: car.x + fx * s, z: car.z + fz * s, vx: car.vx, vz: car.vz })
+      for (const r of net.remotes.values()) {
+        const rfx = Math.sin(r.yaw), rfz = Math.cos(r.yaw)
+        const rvx = rfx * r.speed, rvz = rfz * r.speed
+        for (const s of [1.1, -1.1]) hitters.push({ x: r.x + rfx * s, z: r.z + rfz * s, vx: rvx, vz: rvz })
+      }
+    }
+    conePhys.update(dt, hitters)
+    bushFx.update(dt, hitters)
+
     updateCamera(ix, iz, iyaw, car.slipAngle, dt)
     hud.update(car, score, dt)
     audio.update(car, shapedInput.throttle, score.drifting, dt)

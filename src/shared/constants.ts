@@ -19,14 +19,16 @@ export const TUNING = {
 
   engineForce: 8200, // N at full throttle (pre gear scaling) — deliberately more than the rear tires can put down in low gears
   brakeForce: 12500, // N (~1.05g) — corners are taken by braking down to ~50, so brakes must be strong
-  reverseForce: 7000, // N — brisk reverse, no crawl
+  reverseForce: 9500, // N — snappy reverse, no crawl
   maxSpeed: 52, // m/s soft cap (~187 km/h)
 
-  gripFront: 2.4, // peak lateral μ per axle (force = μ × load) — arcade scale, NOT real tires.
+  gripFront: 3.2, // peak lateral μ per axle (force = μ × load) — arcade scale, NOT real tires.
+  // Front ≥ rear on a front-heavy car: pushing to the limit rotates hard and CAN break
+  // the rear out — turning fast carries a real drift risk, by design.
   // Real μ (~1.5) on this kart-scale map (corner radii 8-15 m) caps cornering at ~50 km/h,
   // so normal driving was 100% understeer ("driving a boat"). ~2.5g grip + gripAssist is
   // what lets the car take tile corners at the speeds the map invites.
-  gripRear: 2.7,
+  gripRear: 3.1,
   peakSlipFront: 0.22, // rad — slip angle at grip peak. Wide peak: full lock at corner speeds
   // lands only slightly past it, so max steer means max grip instead of washing out.
   peakSlipRear: 0.20,
@@ -45,28 +47,39 @@ export const TUNING = {
   // where the nose points instead of sailing on its old vector — THE boat-feel killer.
   // Slip-gated: full below ~4° body slip, zero past gripAssistFadeSlip, off under handbrake,
   // scaled by surface grip² (dirt/grass keep their slide).
-  gripAssist: 4.0, // 1/s lateral-velocity decay at zero slip
-  gripAssistFadeSlip: 0.3, // rad of body slip where assist reaches zero — committed slides are untouched
+  gripAssist: 5.0, // 1/s lateral-velocity decay at zero slip
+  gripAssistFadeSlip: 0.22, // rad of body slip where assist reaches zero — once the tail
+  // genuinely steps out (~7°+) the assist backs off fast and the slide is yours to catch
 
-  handbrakeGrip: 0.28, // rear grip multiplier while handbrake held (×gripRear ≈ 0.76 effective μ) —
+  handbrakeGrip: 0.36, // rear grip multiplier while handbrake held (×gripRear ≈ 1.1 effective μ) —
   // enough slide to drift, enough grip left that it's an arc, not a spin
   handbrakeDriveCut: 1.0, // 1 = fully cuts drive
-  handbrakeKick: 1.2, // rad/s² yaw kick toward the steered direction while handbrake held at speed — space = instant drift
-  driftRecoverDamping: 4.6, // extra yaw damping while the car is straightening — snaps out of the drift cleanly
-  driftScrub: 110, // N·s/m of extra longitudinal drag at full sideways slide — drifting bleeds
-  // some speed but carries enough to link corners (170 stalled the car mid-drift)
+  handbrakeKick: 1.4, // rad/s² yaw kick toward the steered direction while handbrake held at speed — space = instant drift
+  driftGripLoss: 0.18, // fraction of grip BOTH axles lose when fully sideways (fades in
+  // past ~7° body slip) — drifts glide instead of biting, exits re-bite gently
+  driftRecoverDamping: 6.0, // extra yaw damping while the car is straightening — snaps out of the drift cleanly
+  // cornering costs speed (real tires: the lateral force vector tilts back by the slip
+  // angle — "induced drag", per-axle F·sin(slip) in physics.ts). 1.0 = physical scale.
+  // Bites at turn-in (front slip = steering angle before yaw builds) and through the
+  // corner; hard turns visibly slow the car even on throttle, sweepers barely register.
+  cornerDrag: 0.7,
+  driftScrub: 90, // N·s/m of extra longitudinal drag at full sideways slide — cornerDrag
+  // fades out past ~10° body slip, so this alone governs how much a drift bleeds
 
   dragCoeff: 0.62, // quadratic air drag
   rollingResist: 5.5, // linear — coasting carries momentum like the old games
 
   // input shaping (client-side, pre-packet)
   steerMaxLow: 0.66, // rad max steer at standstill
-  steerMaxHigh: 0.1, // rad max steer at maxSpeed (~5.7 deg) — with arcade grip the front can use it
-  steerAttack: 5.0, // full-locks per second toward target — quick corrections, still flickable
+  steerMaxHigh: 0.17, // rad max steer at maxSpeed (~9.7 deg) — with arcade grip the front can use it
+  steerAttack: 6.5, // full-locks per second toward target — quick corrections, still flickable
+  steerExpo: 1.8, // output curve on the steer axis (|s|^expo): the first moments of a
+  // turn produce a gentle angle that builds — turn-in eases in instead of snapping —
+  // while full deflection (and thus flicks/counter-steer) is unchanged. 1 = linear.
   steerRelease: 6.0, // return-to-center rate
   assistGain: 0.65, // counter-steer assist strength (0..1); assist recenters steering around drift equilibrium
   assistMax: 0.5, // rad
-  counterSteerBoost: 2.8, // ×lock restored when fully sideways — how hard a slide is to catch
+  counterSteerBoost: 2.2, // ×lock restored when fully sideways — how hard a slide is to catch
   throttleAttack: 3.2, // keyboard throttle ramp 0→1 per second
   throttleRelease: 6.0,
   yawDamping: 0.55, // 1/s — enough self-stabilizing that slides decay instead of snapping around

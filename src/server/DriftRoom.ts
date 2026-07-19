@@ -3,10 +3,10 @@
 import { Room, Client } from '@colyseus/core'
 import { Schema, MapSchema, type } from '@colyseus/schema'
 import { makeCarState, stepCar, collideCarPair, CarState, InputFrame } from '../shared/physics'
-import { TUNING, PHYS_DT } from '../shared/constants'
+import { TUNING, PHYS_DT, Tuning } from '../shared/constants'
 import { parseMap, ParsedMap, Zone } from '../shared/map'
 import { makeScore, stepScore, DriftScore } from '../shared/scoring'
-import { CARS, carDef } from '../shared/cars'
+import { CARS, carDef, carTuning } from '../shared/cars'
 import { makeCopBrain, stepCopBrain, onCopHit, copSpawn, CopBrain, PIN_TIME, ARREST_IMMUNITY } from '../shared/police'
 import { makeTrafficBrains, stepTrafficBrain, trafficSpawn, TrafficBrain } from '../shared/traffic'
 import { Interrogation, InterrogationFacts, CHAT_TIME_LIMIT_S } from './interrogation'
@@ -14,13 +14,14 @@ import { Interrogation, InterrogationFacts, CHAT_TIME_LIMIT_S } from './interrog
 const COP_ID = 'npc:cop'
 // Civilian cars, in menu order — deliberately not the red estate most players drive,
 // so a pair of headlights in the distance reads as "someone else" at a glance.
-const TRAFFIC_CARS = [3, 5, 1, 6]
+const TRAFFIC_CARS = [3, 5, 1, 6, 7, 2]
 
 const ZONE_NAMES: Record<Zone, string> = {
   v: 'the village lane, past the houses',
   e: 'the narrow lane between the hedges',
   p: 'the open road by the fields',
   w: 'the forest road',
+  h: 'the highway at the edge of the village',
 }
 
 export class PlayerState extends Schema {
@@ -55,6 +56,7 @@ export class DriftState extends Schema {
 
 interface Sim {
   car: CarState
+  tuning: Tuning // merged per-car physics — must match what the client predicts with
   score: DriftScore
   queue: InputFrame[]
   lastInput: InputFrame
@@ -75,7 +77,7 @@ export class DriftRoom extends Room<DriftState> {
   private map!: ParsedMap
   private copBrain!: CopBrain
   private copCar!: CarState
-  private traffic: { brain: TrafficBrain; car: CarState }[] = []
+  private traffic: { brain: TrafficBrain; car: CarState; tuning: Tuning }[] = []
   private interrogation: Interrogation | null = null
   private frozenId = '' // player frozen mid-interrogation
 
@@ -109,7 +111,7 @@ export class DriftRoom extends Room<DriftState> {
       p.z = w.z
       p.yaw = w.yaw
       this.state.players.set(brain.id, p)
-      this.traffic.push({ brain, car })
+      this.traffic.push({ brain, car, tuning: carTuning(p.car) })
     }
 
     this.onMessage('input', (client, frames: InputFrame[]) => {
@@ -148,12 +150,12 @@ export class DriftRoom extends Room<DriftState> {
     this.setSimulationInterval(() => this.tick(), 1000 / 60)
   }
 
-  onJoin(client: Client, options: { name?: string; car?: number; sx?: number; sz?: number }): void {
+  onJoin(client: Client, options: { name?: string; car?: number; sx?: number; sz?: number; syaw?: number }): void {
     const p = new PlayerState()
     const idx = this.sims.size // players only — the cop occupies a players slot but no sim
     p.x = typeof options?.sx === 'number' && isFinite(options.sx) ? options.sx : this.map.spawn.x + (idx % 4) * 5 - 7.5
     p.z = typeof options?.sz === 'number' && isFinite(options.sz) ? options.sz : this.map.spawn.z + Math.floor(idx / 4) * 5
-    p.yaw = this.map.spawn.yaw
+    p.yaw = typeof options?.syaw === 'number' && isFinite(options.syaw) ? options.syaw : this.map.spawn.yaw
     p.car = Math.max(0, Math.min(CARS.length - 1, Math.floor(options?.car ?? 0)))
     p.name = String(options?.name ?? 'driver').slice(0, 16)
     this.state.players.set(client.sessionId, p)
@@ -161,6 +163,7 @@ export class DriftRoom extends Room<DriftState> {
     const car = makeCarState(p.x, p.z, p.yaw)
     this.sims.set(client.sessionId, {
       car,
+      tuning: carTuning(p.car),
       score: makeScore(),
       queue: [],
       lastInput: { seq: 0, steer: 0, throttle: 0, brake: 0, handbrake: false, headlights: true },
@@ -206,12 +209,12 @@ export class DriftRoom extends Room<DriftState> {
       // catch up if the client got ahead (packets are batched)
       let extra = 0
       while (sim.queue.length > 6 && extra < 3) {
-        stepCar(sim.car, input, TUNING, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
+        stepCar(sim.car, input, sim.tuning, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
         stepScore(sim.score, sim.car, PHYS_DT)
         sim.lastInput = sim.queue.shift()!
         extra++
       }
-      stepCar(sim.car, input, TUNING, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
+      stepCar(sim.car, input, sim.tuning, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
       stepScore(sim.score, sim.car, PHYS_DT)
     }
 
@@ -240,7 +243,7 @@ export class DriftRoom extends Room<DriftState> {
     for (const [id, c] of trafficCars) road.set(id, c)
     for (const t of this.traffic) {
       const r = stepTrafficBrain(t.brain, t.car, road, PHYS_DT)
-      stepCar(t.car, r.input, TUNING, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
+      stepCar(t.car, r.input, t.tuning, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
       // same horn message a player sends — clients already play it positionally
       if (r.honk) this.broadcast('horn', { id: t.brain.id })
     }

@@ -67,10 +67,28 @@ export interface Obstacle {
 // because the road curves away from our heading: a fixed-width corridor loses the car
 // in front halfway through every corner, which is precisely when rear-ending it costs
 // the most. Cars strictly behind us are somebody else's problem.
+// `lane` narrows "in my way" from a cone to the actual road ahead. Pass it whenever the
+// driver has a path — it is strictly better, and it is the only thing that works once
+// traffic runs in both directions:
+//
+// The cone's widening term exists to keep sight of the car in front through a curve, but
+// at 10 m it opens to 4.4 m, wider than the 4.2 m between the two lanes — so a car coming
+// the other way, correctly on its own side, reads as an obstacle and every civilian
+// brakes for every car it meets. Tightening the cone for cars that *look* oncoming fails
+// too: through a bend two cars on opposite sides sit nearly perpendicular, so a velocity
+// or heading test doesn't recognise them, and any threshold tight enough to exclude them
+// also stops seeing a spun-out car lying across your own lane — which is the one thing
+// this must never miss. Distance-to-my-own-lane has neither problem: the far lane is a
+// reliable 4.2 m away in corners and straights alike, and anything sprawled across my
+// line is close to it by definition, whichever way it happens to be pointing.
+const LANE_WINDOW = 10 // waypoints of road to test against — samples sit ~3 m apart
+const LANE_HALF = 2.0 // m from my lane line still counts as my lane
+
 export function carAhead(
   self: CarState,
   others: Iterable<[string, CarState]>,
   maxDist = 26,
+  lane?: { path: Waypoint[]; from: number },
 ): Obstacle | null {
   const sin = Math.sin(self.yaw), cos = Math.cos(self.yaw)
   let best: Obstacle | null = null
@@ -79,8 +97,20 @@ export function carAhead(
     const dx = o.x - self.x, dz = o.z - self.z
     const fwd = dx * sin + dz * cos
     if (fwd < -1 || fwd > maxDist) continue
-    const lat = dx * cos - dz * sin
-    if (Math.abs(lat) > 2.2 + Math.max(0, fwd) * 0.22) continue
+    if (lane) {
+      const n = lane.path.length
+      let near2 = Infinity
+      for (let k = 0; k < LANE_WINDOW; k++) {
+        const w = lane.path[(lane.from + k) % n]
+        const ex = o.x - w.x, ez = o.z - w.z
+        const d2 = ex * ex + ez * ez
+        if (d2 < near2) near2 = d2
+      }
+      if (near2 > LANE_HALF * LANE_HALF) continue
+    } else {
+      const lat = dx * cos - dz * sin
+      if (Math.abs(lat) > 2.2 + Math.max(0, fwd) * 0.22) continue
+    }
     const gap = fwd - CAR_LENGTH
     if (best && gap >= best.gap) continue
     best = { id, gap, theirSpeed: o.vx * sin + o.vz * cos }

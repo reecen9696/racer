@@ -166,7 +166,7 @@ export function stepCar(
   let brakeForce = 0
   if (input.brake > 0) {
     if (vLong > 0.5) brakeForce = -input.brake * T.brakeForce
-    else brakeForce = -input.brake * T.reverseForce * clamp(1 + vLong / 14, 0, 1) // reverse, tapering to a ~50 km/h gear cap
+    else brakeForce = -input.brake * T.reverseForce * clamp(1 + vLong / 20, 0, 1) // reverse, tapering to a ~72 km/h gear cap
   }
 
   // --- rear traction budget (friction circle): drive torque beyond what the loaded
@@ -178,6 +178,9 @@ export function stepCar(
 
   // sliding tires scrub speed: extra drag scaling with how sideways the car is
   const driftDrag = -vLong * T.driftScrub * clamp(Math.abs(s.slipAngle) / 0.4, 0, 1)
+  // induced cornering drag: turning hard costs speed. Proportional to the centripetal
+  // force actually being generated (m·v·yawRate) — the real-tire effect (lateral force
+  // tilted back by the slip angle), keyed to yaw so it works in the assist regime too.
   const drag = -T.dragCoeff * vLong * Math.abs(vLong) - T.rollingResist * vLong * ((front.drag + rear.drag) / 2) + driftDrag
   // slope: gravity component along the heading (uphill slows, downhill accelerates)
   let slopeForce = 0
@@ -200,11 +203,28 @@ export function stepCar(
   const frontCap = Math.max(loadF * T.driveTraction * front.longitudinal, 1)
   const frontLongUse = clamp((Math.abs(brakeForce) * T.brakeBias) / frontCap, 0, 1)
   const frontEllipse = Math.max(Math.sqrt(1 - frontLongUse * frontLongUse), 0.35)
-  const fLatFront = axleLateral(slipF, T.peakSlipFront, T.gripFalloff, T.gripFront, loadF, s.surfFL, s.surfFR) * frontEllipse
-  const fLatRear = axleLateral(slipR, T.peakSlipRear, T.gripFalloff, T.gripRear, loadR, s.surfRL, s.surfRR) * hb * rearEllipse
+  // committed slides FLOAT a little: both axles shed some grip as the body goes
+  // sideways — the drift glides rather than biting, and the exit re-bite is softer.
+  const floaty = 1 - T.driftGripLoss * clamp((Math.abs(bodySlip) - 0.12) / 0.35, 0, 1)
+  // the handbrake also relaxes the FRONT: with the rear let go, full front grip does
+  // nothing but yank the car around — this is what whipped a handbrake pull straight
+  // through 40° to near-perpendicular. A handbrake slide should drift, not pirouette.
+  const hbF = input.handbrake ? 0.72 : 1
+  const fLatFront = axleLateral(slipF, T.peakSlipFront, T.gripFalloff, T.gripFront, loadF, s.surfFL, s.surfFR) * frontEllipse * floaty * hbF
+  const fLatRear = axleLateral(slipR, T.peakSlipRear, T.gripFalloff, T.gripRear, loadR, s.surfRL, s.surfRR) * hb * rearEllipse * floaty
+
+  // induced tire drag: a tire making lateral force at slip angle α drags backward by
+  // F·sin(α). This is what bites the moment you turn IN — the front's slip jumps to the
+  // full steering angle before any yaw has built — and keeps scrubbing through the corner.
+  // Gated out below ~30 km/h (full-lock parking slips would stall a hairpin) and faded
+  // out with body slip: sideways, driftScrub owns the bleed — draining vLong mid-slide
+  // makes the slip angle explode instead of the car simply slowing.
+  const induced = (Math.abs(fLatFront) * Math.min(Math.abs(Math.sin(slipF)), 0.5)
+    + Math.abs(fLatRear) * Math.min(Math.abs(Math.sin(slipR)), 0.5)) * T.cornerDrag
+    * clamp(Math.abs(vLong) / 8, 0, 1) * clamp(1 - Math.abs(s.slipAngle) / 0.35, 0, 1)
 
   // --- integrate body frame ---
-  const aLong = (fLong - fLatFront * Math.sin(delta)) / T.mass + vLat * s.yawRate
+  const aLong = (fLong - fLatFront * Math.sin(delta) - induced * Math.sign(vLong)) / T.mass + vLat * s.yawRate
   const aLat = (fLatFront * Math.cos(delta) + fLatRear) / T.mass - vLong * s.yawRate
   s.aLongSmooth += ((fLong / T.mass) - s.aLongSmooth) * clamp(dt * 9, 0, 1)
 
@@ -241,6 +261,17 @@ export function stepCar(
 
   // yaw damping — kept low so a pendulum flick's yaw momentum carries into the drift
   s.yawRate *= 1 - clamp(dt * T.yawDamping, 0, 1)
+  // drift-angle governor: past ~30° body slip, strongly damp only the yaw that would
+  // DEEPEN the slide (deepening yaw has the opposite sign to the slip; recovery yaw is
+  // never touched). Slides settle at a stylish, holdable angle instead of running away
+  // to perpendicular — which is the angle no exit can look nice from.
+  {
+    const slipNow2 = Math.atan2(vLat, Math.max(Math.abs(vLong), 0.5))
+    const excess = clamp((Math.abs(slipNow2) - 0.52) / 0.4, 0, 1)
+    if (excess > 0 && Math.sign(s.yawRate) === -Math.sign(slipNow2)) {
+      s.yawRate *= 1 - clamp(dt * 11 * excess, 0, 1)
+    }
+  }
   // extra damping while straightening: the drift releases cleanly instead of
   // pendulum-snapping into an opposite slide
   const newSlip = Math.atan2(vLat, Math.max(Math.abs(vLong), 0.5))

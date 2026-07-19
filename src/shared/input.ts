@@ -41,9 +41,12 @@ export class InputShaper {
       this.steer += Math.sign(-this.steer) * Math.min(rate, Math.abs(this.steer))
     }
 
+    // expo curve: soft early travel, full authority at the ends — the ramp spends its
+    // first moments in small angles so turn-in eases in instead of arriving instantly
+    let out = Math.sign(this.steer) * Math.pow(Math.abs(this.steer), T.steerExpo)
+
     // counter-steer assist: recenter the "zero" around the drift equilibrium so
     // no-key holds the drift, toward-corner adds angle, away straightens.
-    let out = this.steer
     if (this.assist !== 'off') {
       const gain = (this.assist === 'full' ? 1 : 0.5) * T.assistGain
       const drifting = Math.abs(car.slipAngle) > 0.12 && Math.abs(car.speed) > 5
@@ -51,7 +54,7 @@ export class InputShaper {
         const steerMax = T.steerMaxLow // normalize assist into the -1..1 steer domain
         const counter = -car.slipAngle * gain
         const counterNorm = Math.max(-1, Math.min(1, counter / steerMax))
-        out = Math.max(-1, Math.min(1, this.steer + counterNorm))
+        out = Math.max(-1, Math.min(1, out + counterNorm))
       }
     }
     return out

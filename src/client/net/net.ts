@@ -2,7 +2,7 @@
 // reconciliation for the local car, snapshot-buffer interpolation for remotes.
 import { Client, Room } from 'colyseus.js'
 import { CarState, InputFrame, makeCarState, copyCarState, stepCar } from '../../shared/physics'
-import { TUNING, PHYS_DT } from '../../shared/constants'
+import { TUNING, PHYS_DT, Tuning } from '../../shared/constants'
 import { ParsedMap } from '../../shared/map'
 
 export interface RemoteSnapshot {
@@ -51,6 +51,7 @@ const INTERP_DELAY = 0.12 // s behind server time (two 20 Hz snapshots)
 
 export class NetClient {
   room: Room | null = null
+  tuning: Tuning = TUNING // set to carTuning(chosenCar) by main — replay must match the server sim
   remotes = new Map<string, RemotePlayer>()
   connected = false
   myId = ''
@@ -74,7 +75,7 @@ export class NetClient {
     this.map = map
   }
 
-  async connect(name: string, car: number, sx?: number, sz?: number): Promise<boolean> {
+  async connect(name: string, car: number, sx?: number, sz?: number, syaw?: number): Promise<boolean> {
     this.lastName = name
     this.lastCar = car
     try {
@@ -84,7 +85,7 @@ export class NetClient {
       const isViteDev = location.port === '5173' || location.port === '5174'
       const endpoint = isViteDev ? `${proto}://${location.hostname || 'localhost'}:2567` : `${proto}://${location.host}`
       const client = new Client(endpoint)
-      this.room = await client.joinOrCreate('drift', { name, car, sx, sz })
+      this.room = await client.joinOrCreate('drift', { name, car, sx, sz, syaw })
       this.myId = this.room.sessionId
       this.connected = true
 
@@ -161,7 +162,7 @@ export class NetClient {
     s.surfFL = car.surfFL; s.surfFR = car.surfFR; s.surfRL = car.surfRL; s.surfRR = car.surfRR
     s.wallHit = 0
     for (const input of this.unacked) {
-      stepCar(s, input, TUNING, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
+      stepCar(s, input, this.tuning, PHYS_DT, this.map.surfaceAt, this.map.colliders, this.map.heightAt)
     }
     // smooth correction: snap only when badly wrong, else blend
     const err = Math.hypot(s.x - car.x, s.z - car.z)
