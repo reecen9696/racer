@@ -147,6 +147,17 @@ export class DriftRoom extends Room<DriftState> {
       if (turn.verdict !== 'pending') this.resolveInterrogation(turn.verdict)
     })
 
+    // the driver stops arguing and holds out their wrists — books immediately
+    this.onMessage('cop:give-in', (client) => {
+      if (!this.interrogation || client.sessionId !== this.frozenId) return
+      client.send('cop:reply', {
+        reply: 'Sensible. Out of the car, please.',
+        disposition: 0,
+        verdict: 'arrest',
+      })
+      this.resolveInterrogation('arrest')
+    })
+
     this.setSimulationInterval(() => this.tick(), 1000 / 60)
   }
 

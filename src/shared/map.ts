@@ -414,6 +414,36 @@ export function parseMap(): ParsedMap {
     return true
   }
   const clearOfRoad = (x: number, z: number): boolean => clearOfRoadBy(x, z, 3)
+
+  // world.ts builds 16 small-tree models and selects with `variant % 16`, so any
+  // variant drawn from a range smaller than that silently locks out the tail of the
+  // library — the reason the treeline read as the same handful of green blobs.
+  // Draw from a multiple of 16 so every model comes up equally often.
+  const TREE_VARIANTS = 48
+
+  // The dirt run is one contiguous stretch of the loop, so a normalised position
+  // along it drives scenery variety end to end. One deliberate open stretch breaks
+  // up the woods — you come out of the trees, the sky opens, then it closes back in.
+  const dirtSeq = order.filter((t) => t.dirt)
+  const CLEARING_A = 0.30, CLEARING_B = 0.48 // fraction along the dirt run
+  const clearingPts: Array<[number, number]> = []
+  for (let i = 0; i < dirtSeq.length; i++) {
+    for (let s = 0; s < 8; s++) {
+      const u = (s + 0.5) / 8
+      const p = (i + u) / dirtSeq.length
+      if (p > CLEARING_A && p < CLEARING_B) clearingPts.push(dirtCenterlinePoint(dirtSeq[i], u))
+    }
+  }
+  // 0 in the open heart of the clearing → 1 back in the woods, with a soft rim so
+  // the treeline thins out rather than stopping at a line
+  const clearingFalloff = (x: number, z: number): number => {
+    let best = Infinity
+    for (const [cx, cz] of clearingPts) best = Math.min(best, (x - cx) ** 2 + (z - cz) ** 2)
+    const d = Math.sqrt(best)
+    if (d >= 30) return 1
+    if (d <= 17) return 0
+    return (d - 17) / 13
+  }
   // every lamp faces its arm (local +Z) at the road centerline — consistent and always onto the road
   const lampRotToward = (lx: number, lz: number, tx: number, tz: number): number => Math.atan2(tx - lx, tz - lz)
   // the visual head hangs ~1.15 m out along the arm — the LIGHT lives there, not at the pole tip
@@ -659,7 +689,9 @@ export function parseMap(): ParsedMap {
             if (surfaceAt(tx + ox, tz + oz) !== 'offroad') { treeClear = false; break }
           }
           if (!treeClear) continue
-          props.push({ kind: big ? 'tree_big' : 'tree_small', x: tx, z: tz, rot: hash2(t.gx, t.gz + i, 33) * Math.PI * 2, variant: Math.floor(hash2(t.gx, t.gz + i, 34) * 8) })
+          // the forest wall would otherwise wall straight through the open stretch
+          if (hash2(t.gx + i, t.gz, 36) > clearingFalloff(tx, tz)) continue
+          props.push({ kind: big ? 'tree_big' : 'tree_small', x: tx, z: tz, rot: hash2(t.gx, t.gz + i, 33) * Math.PI * 2, variant: Math.floor(hash2(t.gx, t.gz + i, 34) * TREE_VARIANTS) })
           if (big) colliders.push(box(tx, tz, 0.7, 0.7))
         }
         // bushes closer to the road — dressing only in v1
@@ -771,10 +803,16 @@ export function parseMap(): ParsedMap {
     // The dirt run used to be bush-only, which left it reading as bare scrubland.
     // It now gets trees too — leaning small (small trees have no collider, so the
     // offroad play space stays forgiving) but with real big-tree trunks mixed in.
-    const kind = nearDirt(x, z)
+    let kind: Prop['kind'] = nearDirt(x, z)
       ? r < 0.12 ? 'tree_big' : r < 0.45 ? 'tree_small' : 'bush'
       : r < 0.2 ? 'tree_big' : r < 0.38 ? 'tree_small' : 'bush'
-    props.push({ kind, x, z, rot: hash2(i, 94) * Math.PI * 2, variant: Math.floor(hash2(i, 95) * 12) })
+    // the open stretch keeps its low scrub — it should read as meadow, not scorched earth
+    const cf = clearingFalloff(x, z)
+    if (cf < 1 && kind !== 'bush') {
+      if (hash2(i, 98) > cf) kind = 'bush'
+    }
+    if (cf < 0.5 && hash2(i, 99) > 0.35 + cf) continue
+    props.push({ kind, x, z, rot: hash2(i, 94) * Math.PI * 2, variant: Math.floor(hash2(i, 95) * TREE_VARIANTS) })
     if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
   }
 
@@ -787,7 +825,8 @@ export function parseMap(): ParsedMap {
   // margin than the soft stuff. The dirt run is the offroad play space — the verge
   // you clip while sliding should be small trees and bushes that cost you nothing,
   // with the collidable trunks far enough out that hitting one is a real mistake.
-  for (const t of dirtTiles) {
+  for (let ti = 0; ti < dirtSeq.length; ti++) {
+    const t = dirtSeq[ti]
     const STEPS = 16
     for (let s = 0; s < STEPS; s++) {
       const u = (s + 0.5) / STEPS
@@ -797,21 +836,35 @@ export function parseMap(): ParsedMap {
       const [bx, bz] = dirtCenterlinePoint(t, Math.max(0, u - 0.02))
       const tlen = Math.hypot(ax - bx, az - bz) || 1
       const nx = -(az - bz) / tlen, nz = (ax - bx) / tlen
+      const tanX = (ax - bx) / tlen, tanZ = (az - bz) / tlen
+      // slow wave along the run so density breathes instead of sitting flat
+      const along = (ti + u) / dirtSeq.length
+      const wave = 0.7 + 0.45 * Math.sin(along * Math.PI * 5.3 + 1.1)
       for (const side of [-1, 1]) {
-        for (let slot = 0; slot < 4; slot++) {
-          const salt = t.gx * 31 + t.gz * 17 + s * 7 + slot * 3 + (side > 0 ? 1000 : 0)
-          if (hash2(salt, slot, 401) > 0.72) continue // gaps, so it isn't a hedge wall
-          const r = hash2(salt, s, 402)
-          const kind = r < 0.18 ? 'tree_big' : r < 0.58 ? 'tree_small' : 'bush'
-          // big trunks live in the outer band; soft cover crowds the edge
+        for (let slot = 0; slot < 5; slot++) {
+          // Two-stage hash: fold the cell identity into one value first, then draw
+          // each decision off it. The old salt was a linear combination of the
+          // indices, so neighbouring cells got correlated draws and the treeline
+          // came out visibly banded.
+          const cell = Math.floor(hash2(t.gx * 97 + s, t.gz * 89 + slot, side > 0 ? 1301 : 1607) * 1e6)
+          const dens = wave * clearingFalloff(px + nx * side * 12, pz + nz * side * 12)
+          if (hash2(cell, 401, slot) > 0.62 * dens) continue
+          const r = hash2(cell, 402, s)
+          // Every band gets the full mix. Big trunks still skew outward — they are
+          // the only vegetation with a collider — but they are no longer banned from
+          // the near band, so what you see at the verge actually varies.
+          const kind = r < 0.26 ? 'tree_big' : r < 0.60 ? 'tree_small' : 'bush'
+          // lateral is drawn independently of `slot`, curved toward the road so the
+          // near band stays populated without the slots reading as concentric rows
+          const q = hash2(cell, 403, slot)
           const lat = kind === 'tree_big'
-            ? 11.5 + hash2(salt, slot, 403) * 9
-            : 6.4 + slot * 1.5 + hash2(salt, slot, 404) * 3.5
-          const jit = (hash2(salt, slot, 405) - 0.5) * 3.5
-          const x = px + nx * side * lat + (ax - bx) / tlen * jit
-          const z = pz + nz * side * lat + (az - bz) / tlen * jit
+            ? 9.0 + q * q * 15
+            : 6.3 + q * q * 13
+          const jit = (hash2(cell, 405, slot) - 0.5) * 6.5
+          const x = px + nx * side * lat + tanX * jit
+          const z = pz + nz * side * lat + tanZ * jit
           if (!clearOfRoadBy(x, z, kind === 'tree_big' ? 2.4 : 1.2)) continue
-          props.push({ kind, x, z, rot: hash2(salt, slot, 406) * Math.PI * 2, variant: Math.floor(hash2(salt, slot, 407) * 8) })
+          props.push({ kind, x, z, rot: hash2(cell, 406, slot) * Math.PI * 2, variant: Math.floor(hash2(cell, 407, slot) * TREE_VARIANTS) })
           if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
         }
       }
@@ -881,9 +934,33 @@ export function parseMap(): ParsedMap {
   // is r=1.0, so these half-extents only add the post's own girth on top of it.
   // Signs are `soft` — a sheet-metal plate on a thin post gives and scrubs speed
   // rather than stopping you dead like a concrete lamp base does.
+  // Small trees are 5.5 m conifers, not shrubs — their trunks stop a car, same as the
+  // big ones (bushes stay collider-free: they burst and vanish, and a collider would
+  // leave an invisible wall behind).
+  //
+  // The gate matters. The car's own collision circle is r=1.0, so a trunk box reaches
+  // 1.0 + TRUNK_HALF beyond its centre: a tree planted nearer than that to drivable
+  // surface would shove the car while it is still ON the road — an invisible wall in
+  // the racing line. Measured, one tree sits 1.0 m off the asphalt, so gate on real
+  // clearance rather than assuming placement already handled it. Probes diagonals too;
+  // clearOfRoadBy's 4-point cross misses a tree tucked against a corner tile.
+  const TRUNK_HALF = 0.3
+  const TRUNK_SAFE = 1.6 // car circle 1.0 + TRUNK_HALF + margin
+  const trunkClear = (x: number, z: number): boolean => {
+    for (let a = 0; a < 12; a++) {
+      const ca = Math.cos((a / 12) * Math.PI * 2), sa = Math.sin((a / 12) * Math.PI * 2)
+      for (const d of [0.7, 1.15, TRUNK_SAFE]) {
+        const s = surfaceAt(x + ca * d, z + sa * d)
+        if (s === 'asphalt' || s === 'curb') return false
+      }
+    }
+    return true
+  }
+
   for (const p of props) {
     if (p.kind === 'lampProp') colliders.push(box(p.x, p.z, 0.15, 0.15))
     else if (p.kind === 'sign') colliders.push(box(p.x, p.z, 0.12, 0.12, true))
+    else if (p.kind === 'tree_small' && trunkClear(p.x, p.z)) colliders.push(box(p.x, p.z, TRUNK_HALF, TRUNK_HALF))
   }
 
   // spawn: middle of the village main street (the top EW run), facing east

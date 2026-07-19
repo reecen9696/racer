@@ -1,16 +1,18 @@
-// The traffic stop overlay: Bram's lines, his mood, your reply box, and the clock.
+// The traffic stop overlay: Bram's lines, your reply box, and the clock.
 // The disposition number is deliberately never shown — reading him is the game.
 import { CopTurnMsg } from '../net/net'
 
 export class CopChat {
   private el: HTMLElement
   private log: HTMLElement
-  private input: HTMLInputElement
+  private input: HTMLTextAreaElement
   private clock: HTMLElement
   private banner: HTMLElement
+  private giveIn: HTMLButtonElement
   open = false
   private deadline = 0
   private onSend: (text: string) => void = () => {}
+  private onGiveIn: () => void = () => {}
 
   constructor() {
     this.el = document.createElement('div')
@@ -20,25 +22,36 @@ export class CopChat {
       <div id="cop-frame">
         <div id="cop-head"><span id="cop-who">SGT. BRAM HOLLIS · MILLBROOK POLICE</span><span id="cop-clock">90</span></div>
         <div id="cop-log"></div>
-        <input id="cop-input" maxlength="200" placeholder="say something…" autocomplete="off" />
+        <textarea id="cop-input" maxlength="200" rows="3" placeholder="say something…" autocomplete="off" spellcheck="false"></textarea>
+        <div id="cop-foot"><span id="cop-hint">ENTER TO SPEAK · SHIFT+ENTER FOR A NEW LINE</span><button id="cop-give-in" type="button">GIVE IN</button></div>
       </div>
       <div id="cop-banner"></div>
     `
     document.body.appendChild(this.el)
     this.log = this.el.querySelector('#cop-log')!
-    this.input = this.el.querySelector('#cop-input') as HTMLInputElement
+    this.input = this.el.querySelector('#cop-input') as HTMLTextAreaElement
     this.clock = this.el.querySelector('#cop-clock')!
     this.banner = this.el.querySelector('#cop-banner')!
+    this.giveIn = this.el.querySelector('#cop-give-in') as HTMLButtonElement
 
     this.input.addEventListener('keydown', (e) => {
       e.stopPropagation() // never let WASD in the reply box drive the car
-      if (e.code !== 'Enter') return
+      if (e.code !== 'Enter' || e.shiftKey) return
+      e.preventDefault() // Enter speaks; it must not leave a newline behind
       const text = this.input.value.trim()
       if (!text) return
       this.push('you', text)
       this.input.value = ''
-      this.input.disabled = true
+      this.setBusy(true)
       this.onSend(text)
+    })
+
+    // hands up — take the booking rather than keep talking
+    this.giveIn.addEventListener('click', () => {
+      if (!this.open || this.giveIn.disabled) return
+      this.push('you', 'I give in.')
+      this.setBusy(true)
+      this.onGiveIn()
     })
   }
 
@@ -46,8 +59,9 @@ export class CopChat {
     return document.activeElement === this.input
   }
 
-  start(turn: CopTurnMsg, onSend: (text: string) => void): void {
+  start(turn: CopTurnMsg, onSend: (text: string) => void, onGiveIn: () => void): void {
     this.onSend = onSend
+    this.onGiveIn = onGiveIn
     this.open = true
     this.log.innerHTML = ''
     this.banner.className = ''
@@ -55,32 +69,30 @@ export class CopChat {
     this.el.style.display = 'block'
     this.deadline = performance.now() / 1000 + (turn.timeLimit ?? 90)
     this.say(turn)
-    this.input.disabled = false
-    this.input.focus()
   }
 
   say(turn: CopTurnMsg): void {
-    this.push('bram', turn.reply, turn.mood)
-    this.input.disabled = false
+    this.push('bram', turn.reply)
+    this.setBusy(false)
     if (this.open) this.input.focus()
   }
 
-  private push(who: 'bram' | 'you', text: string, mood?: string): void {
+  // while Bram is thinking, neither the box nor the button should take input
+  private setBusy(busy: boolean): void {
+    this.input.disabled = busy
+    this.giveIn.disabled = busy
+  }
+
+  private push(who: 'bram' | 'you', text: string): void {
     const line = document.createElement('div')
     line.className = 'cop-line ' + who
     line.textContent = text
     this.log.appendChild(line)
-    if (mood) {
-      const m = document.createElement('div')
-      m.className = 'cop-mood'
-      m.textContent = '«' + mood + '»'
-      this.log.appendChild(m)
-    }
     this.log.scrollTop = this.log.scrollHeight
   }
 
   verdict(v: 'release' | 'arrest', score: number): void {
-    this.input.disabled = true
+    this.setBusy(true)
     this.input.blur()
     this.banner.className = 'show ' + v
     this.banner.textContent = v === 'release' ? 'LET OFF WITH A WARNING' : `BOOKED — ${score} POINTS SEIZED`

@@ -84,12 +84,17 @@ export async function buildTacosTown(world: World): Promise<void> {
       m.visible = false
       return
     }
+    if (/^Road/.test(m.name)) {
+      const mats = Array.isArray(m.material) ? m.material : [m.material]
+      console.log('[tacos road]', m.name, 'mats:', mats.map((x) => `${x.name}->${findTex(x.name || '') ?? 'MISS'}`).join(','), 'groups:', (m.geometry as THREE.BufferGeometry).groups.length, 'visible:', m.visible)
+    }
     m.material = Array.isArray(m.material) ? m.material.map(convert) : convert(m.material)
     meshes.push(m)
   })
+  console.log('[tacos] meshes:', meshes.length)
 
   fbx.scale.setScalar(0.01) // authored in cm
-  fbx.position.set(TACOS_TOWN.x, TACOS_TOWN.y, TACOS_TOWN.z)
+  fbx.position.set(TACOS_TOWN.x, 1.0 /* TEMP z-fight probe */, TACOS_TOWN.z)
   world.group.add(fbx)
   fbx.updateMatrixWorld(true)
 

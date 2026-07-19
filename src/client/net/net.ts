@@ -40,7 +40,6 @@ export interface RemotePlayer {
 
 export interface CopTurnMsg {
   reply: string
-  mood: string
   disposition: number // drives the happy/annoyed sting — never rendered as a number
   verdict: 'pending' | 'release' | 'arrest'
   timeLimit?: number
@@ -139,6 +138,10 @@ export class NetClient {
 
   copChat(text: string): void {
     this.room?.send('cop:chat', text)
+  }
+
+  copGiveIn(): void {
+    this.room?.send('cop:give-in')
   }
 
   // reconcile local prediction against the latest server state; returns true if corrected

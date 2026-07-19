@@ -35,13 +35,17 @@
     #cop-frame { position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%); width: min(620px, 92vw);
       background: rgba(6,8,18,.9); border: 1px solid #2a2f4a; pointer-events: auto; z-index: 1; }
     #cop-head { display: flex; justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid #2a2f4a; font-size: 10px; letter-spacing: 2px; color: #9aa1c4; }
-    #cop-log { max-height: 24vh; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 7px; }
+    #cop-log { max-height: 30vh; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 7px; }
     .cop-line { font-size: 14px; line-height: 1.55; max-width: 78%; }
     .cop-line.bram { color: #e8e3d2; }
     .cop-line.you { color: #7fd4ff; text-align: right; align-self: flex-end; }
-    .cop-mood { font-size: 11px; color: #8a8fb0; font-style: italic; margin-top: -3px; }
-    #cop-input { width: 100%; box-sizing: border-box; background: #0a0d1f; border: none; border-top: 1px solid #2a2f4a; color: #cfd2e8; padding: 12px 14px; font-family: var(--pix); font-size: 13px; outline: none; }
+    #cop-input { display: block; width: 100%; box-sizing: border-box; min-height: 78px; resize: none; background: #0a0d1f; border: none; border-top: 1px solid #2a2f4a; color: #cfd2e8; padding: 12px 14px; font-family: var(--pix); font-size: 13px; line-height: 1.5; outline: none; }
     #cop-input:disabled { color: #4a4f6a; }
+    #cop-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; background: #0a0d1f; border-top: 1px solid #1c2038; }
+    #cop-hint { font-size: 9px; letter-spacing: 2px; color: #565b7c; }
+    #cop-give-in { font-family: var(--pix); font-size: 10px; letter-spacing: 2px; color: #ff9a8b; background: transparent; border: 1px solid #4a2f36; padding: 6px 12px; cursor: pointer; }
+    #cop-give-in:hover:not(:disabled) { color: #ff7a6b; border-color: #7a3f42; background: rgba(122,63,66,.18); }
+    #cop-give-in:disabled { color: #4a4f6a; border-color: #262a42; cursor: default; }
     #cop-banner { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; font-size: 26px; letter-spacing: 5px; text-shadow: 2px 2px 0 #000; }
     #cop-banner.show { display: flex; }
     #cop-banner.release { color: #a5ffb0; }

@@ -207,7 +207,11 @@ async function boot(): Promise<void> {
     audio.setInterrogation(true)
     audio.copSting('open')
     copMood = turn.disposition
-    copChat.start(turn, (text) => net.copChat(text))
+    copChat.start(
+      turn,
+      (text) => net.copChat(text),
+      () => net.copGiveIn(),
+    )
   }
   net.onCopReply = (turn) => {
     audio.copSting(turn.disposition >= copMood ? 'happy' : 'annoyed')
