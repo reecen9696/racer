@@ -2,11 +2,15 @@
 // that emits ordinary InputFrames — same physics, same netcode path as a player.
 // Server-only stepping; clients render him as a remote player with extra flags.
 import { CarState, InputFrame } from './physics'
-import { ParsedMap, RoadTile, dirtCenterlinePoint } from './map'
+import { ParsedMap } from './map'
 import { TILE } from './constants'
 import {
   Waypoint, clamp, wrapAngle, dist, steerToward, speedControl, pointAhead, carAhead, followSpeed,
 } from './driving'
+import {
+  RoadGraph, Route, buildRoadGraph, seatRoute, resetRoute, extendRoute, trimRoute,
+  nearestOnGraph, routeSpawn, junctionAhead, junctionYield,
+} from './roadgraph'
 
 export type CopMode = 'patrol' | 'pursuit' | 'interrogate' | 'cooldown'
 
@@ -16,8 +20,9 @@ export interface CopBrain {
   id: string // 'npc:cop0' — matches the PlayerState key the room publishes
   officer: number // index into server/officers.ts OFFICERS — who is behind the wheel
   mode: CopMode
-  path: Waypoint[] // lane-offset patrol ring built from map.loopOrder
-  wpIndex: number
+  graph: RoadGraph // shared reference — the network he patrols
+  route: Route // rolling patrol route, re-chosen at every junction
+  jamT: number // s held at a give-way line — breaks a mutual stand-off
   targetId: string // pursuit / interrogation target
   assistId: string // responding to another unit's call — see joinPursuit
   pinT: number // 0..PIN_TIME accumulated pin seconds
@@ -61,85 +66,32 @@ export const ASSIST_RANGE = 130 // m — a responder switches from driving to hu
 const PATROL_SPEED = 15 // m/s ≈ 54 km/h — still above the civilians' ~12
 const RESPOND_SPEED = 27 // m/s ≈ 97 km/h — blues-and-twos along the ring, not yet hunting
 const PURSUIT_SPEED = 50 // just under player maxSpeed (52); rubber band does the rest
-const LANE_OFFSET = 2.1 // m right of centerline
+// The lane geometry that used to live here — sampling dirtCenterlinePoint and pushing
+// the result out to the driving lane — now belongs to roadgraph.ts, which does it per
+// network edge instead of once round map.loopOrder. The cop follows a route built from
+// that graph, so he can leave the village loop the same way anyone else does.
 
-const TILE_SAMPLES = 5 // per tile — corners are quarter arcs, so straight-lining cuts them
-
-// Build the patrol ring from the road's real centerline, offset to the driving lane.
-// Right-of-travel = (cos h, -sin h) for heading h in our (sin, cos) forward frame.
-//
-// `dirtCenterlinePoint` is named for the dirt section but is generic tile geometry:
-// with S_AMP at 0 it returns a dead-straight line through straights and a quarter
-// arc through corners — i.e. the actual road, on every surface. Sampling it beats
-// tile-center + midpoint, which cuts every corner diagonally and throws the cop
-// into the hedge at patrol speed. T/cross tiles have >2 arms and no single arc, so
-// they keep the center+midpoint treatment.
-//
-// `reverse` walks the loop the other way round. The offset is always applied to the
-// right of TRAVEL, so reversing the tile order lands the lane on the physically opposite
-// side of the road automatically — that's oncoming traffic, no separate geometry needed.
-export function buildPatrolPath(map: ParsedMap, reverse = false): Waypoint[] {
-  const tiles: RoadTile[] = reverse ? [...map.loopOrder].reverse() : map.loopOrder
-  const out: Waypoint[] = []
-  const n = tiles.length
-  const offset = (x: number, z: number, h: number): Waypoint => ({
-    x: x + Math.cos(h) * LANE_OFFSET,
-    z: z - Math.sin(h) * LANE_OFFSET,
-  })
-  for (let i = 0; i < n; i++) {
-    const t = tiles[i]
-    const next = tiles[(i + 1) % n]
-    const h = Math.atan2(next.x - t.x, next.z - t.z)
-
-    // T junctions the loop passes straight through (highway turn-offs) sample the
-    // centerline like any straight — dirtCenterlinePoint routes them on the through axis
-    const throughT =
-      (t.piece === 't' || t.piece === 'cross') && ((t.dirs.n && t.dirs.s) || (t.dirs.e && t.dirs.w))
-    if (t.piece === 'straight' || t.piece === 'corner' || throughT) {
-      // the centerline's own u direction is arbitrary — walk it whichever way
-      // actually heads toward the next tile
-      const [x0, z0] = dirtCenterlinePoint(t, 0)
-      const [x1, z1] = dirtCenterlinePoint(t, 1)
-      const forward = dist(x1, z1, next.x, next.z) <= dist(x0, z0, next.x, next.z)
-      for (let k = 0; k < TILE_SAMPLES; k++) {
-        const s = (k + 0.5) / TILE_SAMPLES
-        const u = forward ? s : 1 - s
-        const [px, pz] = dirtCenterlinePoint(t, u)
-        // local tangent, so the lane offset stays perpendicular through the curve
-        const [qx, qz] = dirtCenterlinePoint(t, clamp(forward ? u + 0.06 : u - 0.06, 0, 1))
-        const th = Math.atan2(qx - px, qz - pz)
-        out.push(offset(px, pz, th))
-      }
-      continue
-    }
-
-    out.push(offset(t.x, t.z, h))
-    // midpoint waypoint keeps pure pursuit honest across 15.5 m tiles
-    out.push(offset((t.x + next.x) / 2, (t.z + next.z) / 2, h))
-  }
-  return out
-}
-
-// Where a cop starts his shift — on the ring at his own waypoint, ALREADY FACING
-// along it. Spawning at yaw 0 points him at whatever the map's +z happens to be,
-// which is usually a hedge, and he opens the session by reversing out of a garden.
+// Where a cop starts his shift — on his route, ALREADY FACING along it. Spawning at
+// yaw 0 points him at whatever the map's +z happens to be, which is usually a hedge,
+// and he opens the session by reversing out of a garden.
 export function copSpawn(brain: CopBrain): { x: number; z: number; yaw: number } {
-  const n = brain.path.length
-  const a = brain.path[brain.wpIndex % n]
-  const b = brain.path[(brain.wpIndex + 1) % n]
-  return { x: a.x, z: a.z, yaw: Math.atan2(b.x - a.x, b.z - a.z) }
+  return routeSpawn(brain.route)
 }
 
-// `seat` of `seats` spreads the units evenly round the ring, so the shift starts
-// spaced out rather than as a three-car convoy leaving the same waypoint.
-export function makeCopBrain(map: ParsedMap, id: string, officer: number, seat = 0, seats = 1): CopBrain {
-  const path = buildPatrolPath(map)
+// `seat` of `seats` spreads the units over the network, so the shift starts scattered
+// across the village, the highway and the town rather than as a three-car convoy
+// leaving the same waypoint.
+export function makeCopBrain(
+  map: ParsedMap, id: string, officer: number, seat = 0, seats = 1,
+  graph: RoadGraph = buildRoadGraph(map),
+): CopBrain {
   return {
     id,
     officer,
     mode: 'patrol',
-    path,
-    wpIndex: Math.floor((path.length * seat) / Math.max(1, seats)),
+    graph,
+    route: seatRoute(graph, seat, seats, [...graph.edges.keys()], 0xc0b1, 1),
+    jamT: 0,
     targetId: '',
     assistId: '',
     pinT: 0,
@@ -177,6 +129,7 @@ export function stepCopBrain(
   traffic?: Map<string, CarState>,
 ): CopStepResult {
   brain.tick++
+  const route = brain.route
   for (const [id, t] of brain.immunity) {
     const left = t - dt
     if (left <= 0) brain.immunity.delete(id)
@@ -211,8 +164,8 @@ export function stepCopBrain(
   const onPatrol = brain.mode === 'patrol' || brain.mode === 'cooldown'
   const laneAhead = onPatrol
     ? carAhead(cop, traffic?.size ? new Map([...players, ...traffic]) : players, 26, {
-        path: brain.path,
-        from: brain.wpIndex,
+        path: route.path,
+        from: route.wpIndex,
       })
     : null
   const laneSpeed = laneAhead ? followSpeed(cop, laneAhead) : Infinity
@@ -252,27 +205,24 @@ export function stepCopBrain(
     // a teleport nobody witnesses is free; one in front of a player is jarring, so
     // give the reverse-recovery longer to work it out while someone is watching
     if (brain.wedgeT > (nearest > UNSEEN_DIST ? UNWEDGE_UNSEEN : UNWEDGE_TIME)) {
-      const n0 = brain.path.length
-      let best = 0
-      let bestD = Infinity
-      for (let k = 0; k < n0; k++) {
-        const d = dist(cop.x, cop.z, brain.path[k].x, brain.path[k].z)
-        if (d < bestD) { bestD = d; best = k }
-      }
-      const a = brain.path[best]
-      const b = brain.path[(best + 1) % n0]
-      cop.x = a.x
-      cop.z = a.z
-      cop.yaw = Math.atan2(b.x - a.x, b.z - a.z)
+      // Rejoin the NETWORK at whatever road he's actually beside, on a fresh route —
+      // not the nearest point of his own stale one, which after a pursuit can be the
+      // far side of the map from where he ended up.
+      const near = nearestOnGraph(brain.graph, cop.x, cop.z)
+      resetRoute(route, brain.graph, near.edgeId, near.frac)
+      const s = routeSpawn(route)
+      cop.x = s.x
+      cop.z = s.z
+      cop.yaw = s.yaw
       cop.vx = 0
       cop.vz = 0
       cop.yawRate = 0
-      brain.wpIndex = (best + 1) % n0
       brain.lastX = cop.x
       brain.lastZ = cop.z
       brain.wedgeT = 0
       brain.stuckT = 0
       brain.reverseT = 0
+      brain.jamT = 0
     }
   }
 
@@ -281,7 +231,7 @@ export function stepCopBrain(
     brain.reverseT -= dt
     input.brake = 1 // full: brake past standstill = reverse in this physics
     // alternate the steer each attempt — repeating the same lock just re-wedges him
-    const wp0 = brain.path[brain.wpIndex]
+    const wp0 = route.path[route.wpIndex]
     input.steer = (brain.stuckTries % 2 === 0 ? -1 : 1) * Math.abs(steerToward(cop, wp0.x, wp0.z)) || 0.6
     return { input, pinnedNow: false }
   }
@@ -387,7 +337,7 @@ export function stepCopBrain(
   }
 
   // --- patrol / cooldown driving ---
-  let wp = brain.path[brain.wpIndex]
+  let wp = route.path[route.wpIndex]
   // Advance when reached, or when it's slipped behind him (overshot on a corner) —
   // the dirt samples sit ~3 m apart, so the radius must stay under that or he skips
   // waypoints and straight-lines off the curve he's meant to be following.
@@ -397,21 +347,25 @@ export function stepCopBrain(
     const behind = (w.x - cop.x) * Math.sin(cop.yaw) + (w.z - cop.z) * Math.cos(cop.yaw) < 0
     return behind && d < TILE * 0.5
   }
-  for (let guard = 0; guard < 4 && reached(wp); guard++) {
-    brain.wpIndex = (brain.wpIndex + 1) % brain.path.length
-    wp = brain.path[brain.wpIndex]
+  for (let guard = 0; guard < 4 && reached(wp) && route.wpIndex < route.path.length - 1; guard++) {
+    route.wpIndex++
+    wp = route.path[route.wpIndex]
   }
+  // keep road ahead of him and drop what's behind — the route is rolling, not a ring,
+  // and this is what turns "one more waypoint" into "pick a way at the next junction"
+  extendRoute(route, brain.graph)
+  trimRoute(route)
   // Curvature over a speed-scaled lookahead window, not just the next waypoint:
   // the samples sit ~3 m apart, so one-ahead is ~0.2 s of warning at patrol speed
   // and he arrives at a 7.8 m corner arc still doing 54 km/h. Roughly 1.8 s of
   // travel gives him room to brake down to a speed the corner's grip allows.
-  const np = brain.path.length
+  const np = route.path.length
   const look = clamp(Math.ceil((Math.abs(cop.speed) * 1.8) / 3), 2, 10)
   let curve = 0
   let prevH = Math.atan2(wp.x - cop.x, wp.z - cop.z)
   for (let k = 1; k <= look; k++) {
-    const a = brain.path[(brain.wpIndex + k - 1) % np]
-    const b = brain.path[(brain.wpIndex + k) % np]
+    const a = route.path[Math.min(route.wpIndex + k - 1, np - 1)]
+    const b = route.path[Math.min(route.wpIndex + k, np - 1)]
     const h = Math.atan2(b.x - a.x, b.z - a.z)
     curve += Math.abs(wrapAngle(h - prevH))
     prevH = h
@@ -427,9 +381,22 @@ export function stepCopBrain(
   // `laneSpeed`: arriving at a shout is no excuse for going through the back of a
   // civilian, and a pile-up in the village is how a responder becomes the incident.
   const cruise = brain.assistId ? RESPOND_SPEED : PATROL_SPEED
-  const targetSpeed = Math.min(cruise * clamp(1 - curve * 0.3, 0.42, 1), laneSpeed)
 
-  const aim = pointAhead(brain.path, brain.wpIndex, cop, clamp(5 + Math.abs(cop.speed) * 0.85, 6, 20))
+  // --- give way at the junction ahead ---
+  // He obeys the same priority rules as everyone else while patrolling: stops on the
+  // terminating arm of a T when something is coming, and at town crossings. NOT while
+  // responding to a call — blues-and-twos is exactly the exemption it looks like, and a
+  // responder that stops dead at every junction never arrives.
+  const jn = brain.assistId ? null : junctionAhead(route, brain.graph, cop.x, cop.z)
+  const junctionCap = jn
+    ? junctionYield(jn, brain.id, cop, traffic?.size ? new Map([...players, ...traffic]) : players, brain.jamT)
+    : Infinity
+  if (junctionCap < 0.5 && Math.abs(cop.speed) < 1) brain.jamT += dt
+  else if (junctionCap === Infinity) brain.jamT = 0
+
+  const targetSpeed = Math.min(cruise * clamp(1 - curve * 0.3, 0.42, 1), laneSpeed, junctionCap)
+
+  const aim = pointAhead(route.path, route.wpIndex, cop, clamp(5 + Math.abs(cop.speed) * 0.85, 6, 20))
   input.steer = steerToward(cop, aim.x, aim.z)
   const sc = speedControl(cop, targetSpeed)
   input.throttle = sc.throttle
@@ -439,6 +406,12 @@ export function stepCopBrain(
   // and the village's slopes roll him on top of that. Hold the car instead.
   if (targetSpeed < 0.5) input.throttle = 0
   if (laneAhead && laneAhead.gap < 4 && cop.speed > 0.05) {
+    input.throttle = 0
+    input.brake = cop.speed > 0.5 ? 1 : 0.5
+  }
+  // Hold at a give-way line for the same reason — below 1 m/s speedControl stops
+  // braking, and a car that rolls into a junction at walking pace still gets T-boned.
+  if (junctionCap < 0.5 && cop.speed > 0.05) {
     input.throttle = 0
     input.brake = cop.speed > 0.5 ? 1 : 0.5
   }

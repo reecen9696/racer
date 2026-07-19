@@ -150,6 +150,17 @@ export const TACOS_TOWN = {
   y: 0.06, // sink so the town's road surface (local y≈-0.04) sits just above terrain
 }
 
+// the diorama's outer ring streets never connect at the four town corners (the
+// original scene just ran them off the edge) — the client lays tiling asphalt
+// quads over these LOCAL-space rects, and each corner gets a game lamp post.
+// tacosSurface already reads these regions as asphalt via the corridor bands.
+export const TACOS_CORNERS = [
+  { minX: -82.0, minZ: 65.4, maxX: -59.1, maxZ: 88.3 }, // NW
+  { minX: 90.9, minZ: 65.4, maxX: 113.9, maxZ: 88.3 }, // NE
+  { minX: -82.0, minZ: -107.6, maxX: -59.1, maxZ: -84.7 }, // SW
+  { minX: 90.9, minZ: -107.6, maxX: 113.9, maxZ: -84.7 }, // SE
+]
+
 const inTacosTown = (x: number, z: number, pad = 0): boolean =>
   x >= TACOS_TOWN.x + TACOS_BOUNDS.minX - pad && x <= TACOS_TOWN.x + TACOS_BOUNDS.maxX + pad &&
   z >= TACOS_TOWN.z + TACOS_BOUNDS.minZ - pad && z <= TACOS_TOWN.z + TACOS_BOUNDS.maxZ + pad
@@ -784,6 +795,110 @@ export function parseMap(): ParsedMap {
     lamps.push({ x: TACOS_TOWN.x + l.x, z: TACOS_TOWN.z + l.z, color: SODIUM, radius: 13, intensity: 1.0, height: l.h })
   }
 
+  // one game lamp post on the block-corner sidewalk at each patched town corner,
+  // arm aimed over the new asphalt
+  for (const c of TACOS_CORNERS) {
+    const innerLX = Math.abs(c.minX - 16) < Math.abs(c.maxX - 16) ? c.minX : c.maxX
+    const innerLZ = Math.abs(c.minZ + 9.7) < Math.abs(c.maxZ + 9.7) ? c.minZ : c.maxZ
+    const lx = TACOS_TOWN.x + innerLX + Math.sign(16 - innerLX) * 1.2
+    const lz = TACOS_TOWN.z + innerLZ + Math.sign(-9.7 - innerLZ) * 1.2
+    const cx = TACOS_TOWN.x + (c.minX + c.maxX) / 2
+    const cz = TACOS_TOWN.z + (c.minZ + c.maxZ) / 2
+    const head = lampHead(lx, lz, cx, cz)
+    lamps.push({ x: head.hx, z: head.hz, color: SODIUM, radius: 13, intensity: 1.05, height: 5.2 })
+    props.push({ kind: 'lampProp', x: lx, z: lz, rot: head.rot, variant: 0 })
+  }
+
+  // trees filling the town's open grass blocks: dense deterministic scatter,
+  // 3 m off any street asphalt, 2 m clear of every building/prop collider
+  const townTreeClear = (x: number, z: number, probe = 3): boolean => {
+    for (const [ox, oz] of [[0, 0], [probe, 0], [-probe, 0], [0, probe], [0, -probe]] as const) {
+      if (tacosSurface(x + ox, z + oz) !== 'curb') return false
+    }
+    // the stub's tile asphalt isn't a town band — keep the entry strip clear
+    // (clearOfRoad can't be used here: surfaceAt says 'curb' town-wide)
+    if (x < TACOS_TOWN.x + TACOS_ROAD_X[0] + 1 && Math.abs(z - 5 * TILE) < 12) return false
+    for (const c of TACOS_COLLIDERS) {
+      if (
+        x > TACOS_TOWN.x + c.minX - 2 && x < TACOS_TOWN.x + c.maxX + 2 &&
+        z > TACOS_TOWN.z + c.minZ - 2 && z < TACOS_TOWN.z + c.maxZ + 2
+      ) return false
+    }
+    return true
+  }
+  for (let i = 0; i < 2800; i++) {
+    const x = TACOS_TOWN.x + TACOS_BOUNDS.minX + 4 + hash2(i, 401) * (TACOS_BOUNDS.maxX - TACOS_BOUNDS.minX - 8)
+    const z = TACOS_TOWN.z + TACOS_BOUNDS.minZ + 4 + hash2(i, 402) * (TACOS_BOUNDS.maxZ - TACOS_BOUNDS.minZ - 8)
+    if (hash2(i, 403) > 0.8) continue
+    if (!townTreeClear(x, z)) continue
+    const r = hash2(i, 404)
+    const kind = r < 0.35 ? 'tree_big' : r < 0.65 ? 'tree_small' : 'bush'
+    props.push({ kind, x, z, rot: hash2(i, 405) * Math.PI * 2, variant: Math.floor(hash2(i, 406) * 12) })
+    if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
+  }
+
+  // street-border trees: rows marching along every town street, ~7 m pitch with
+  // jitter, planted 2.2–3.4 m off the asphalt edge on both sides
+  {
+    const rows: Array<{ axis: 'ns' | 'ew'; a: number; b: number; lo: number; hi: number }> = []
+    for (const [a, b] of TACOS_NS_BANDS) rows.push({ axis: 'ns', a, b, lo: TACOS_ROAD_Z[0], hi: TACOS_ROAD_Z[1] })
+    for (const [a, b] of TACOS_EW_BANDS) rows.push({ axis: 'ew', a, b, lo: TACOS_ROAD_X[0], hi: TACOS_ROAD_X[1] })
+    let ti = 0
+    for (const row of rows) {
+      for (let along = row.lo + 4; along < row.hi - 4; along += 7) {
+        for (const side of [-1, 1]) {
+          ti++
+          if (hash2(ti, 421) > 0.75) continue // broken rows, not a perfect hedge
+          const off = (side < 0 ? row.a : row.b) + side * (2.2 + hash2(ti, 422) * 1.2)
+          const jit = (hash2(ti, 423) - 0.5) * 3
+          const lx = row.axis === 'ns' ? off : along + jit
+          const lz = row.axis === 'ns' ? along + jit : off
+          const x = TACOS_TOWN.x + lx
+          const z = TACOS_TOWN.z + lz
+          if (!inTacosTown(x, z, -3) || !townTreeClear(x, z, 0.8)) continue
+          const r = hash2(ti, 424)
+          const kind = r < 0.5 ? 'tree_big' : r < 0.85 ? 'tree_small' : 'bush'
+          props.push({ kind, x, z, rot: hash2(ti, 425) * Math.PI * 2, variant: Math.floor(hash2(ti, 426) * 12) })
+          if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
+        }
+      }
+    }
+  }
+
+  // forest belt AROUND the town — the region east of the map grid is otherwise
+  // bare void. 30 m density cells squared for contrast: thick stands + open gaps
+  {
+    const beltMax = 85
+    const spanX = TACOS_BOUNDS.maxX - TACOS_BOUNDS.minX + beltMax * 2
+    const spanZ = TACOS_BOUNDS.maxZ - TACOS_BOUNDS.minZ + beltMax * 2
+    for (let i = 0; i < 2400; i++) {
+      const x = TACOS_TOWN.x + TACOS_BOUNDS.minX - beltMax + hash2(i, 501) * spanX
+      const z = TACOS_TOWN.z + TACOS_BOUNDS.minZ - beltMax + hash2(i, 502) * spanZ
+      if (inTacosTown(x, z, 5)) continue // town + skirt stays clear
+      const cd = hash2(Math.floor(x / 30), Math.floor(z / 30), 96)
+      if (hash2(i, 503) > cd * cd * 2.4) continue
+      if (!clearOfRoad(x, z)) continue
+      const r = hash2(i, 504)
+      const kind = r < 0.42 ? 'tree_big' : r < 0.72 ? 'tree_small' : 'bush'
+      props.push({ kind, x, z, rot: hash2(i, 505) * Math.PI * 2, variant: Math.floor(hash2(i, 506) * 12) })
+      if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
+    }
+  }
+
+  // broken tree lines pressed close to the approach road (junction → town entry):
+  // ~12 m sections gate on a hash, so stands come and go instead of a uniform hedge
+  for (let i = 0; i < 320; i++) {
+    const x = 19.8 * TILE + hash2(i, 511) * (22.6 * TILE - 19.8 * TILE)
+    const side = hash2(i, 512) < 0.5 ? 1 : -1
+    if (hash2(Math.floor(x / 12), side, 513) > 0.55) continue // this section stays open
+    const z = 5 * TILE + side * (8.8 + hash2(i, 514) * 4.5)
+    if (!clearOfRoad(x, z) || inTacosTown(x, z, 5)) continue
+    const r = hash2(i, 515)
+    const kind = r < 0.55 ? 'tree_big' : r < 0.85 ? 'tree_small' : 'bush'
+    props.push({ kind, x, z, rot: hash2(i, 516) * Math.PI * 2, variant: Math.floor(hash2(i, 517) * 12) })
+    if (kind === 'tree_big') colliders.push(box(x, z, 0.7, 0.7))
+  }
+
   // --- vegetation scatter: density-field driven so some areas are thick woods and
   // others open meadow; bushes-only near the dirt road (offroad play space);
   // NOTHING is allowed to overhang the road (5-point clearance around each trunk)
@@ -887,7 +1002,9 @@ export function parseMap(): ParsedMap {
     if (t.piece !== 'straight') continue
     if (t.dirt || t.zone === 'h') continue // not the drift playground, not the highway
     for (const side of [-1, 1]) {
-      if (hash2(t.gx, t.gz, side + 730) > 0.24) continue // ~1 straight in 4, per side
+      // The loop only has ~21 paved straights, so this rolls generously — most
+      // candidates still die on the clearance and spacing checks below.
+      if (hash2(t.gx, t.gz, side + 730) > 0.45) continue
       const u = 0.25 + hash2(t.gx, t.gz, side + 731) * 0.5 // keep clear of the tile seams
       const [px, pz] = dirtCenterlinePoint(t, u)
       const [ax, az] = dirtCenterlinePoint(t, Math.min(1, u + 0.02))
@@ -897,18 +1014,26 @@ export function parseMap(): ParsedMap {
       const nx = -tanZ, nz = tanX
       // walk out from the centreline until the surface stops being drivable, then sit
       // just beyond it — this is what adapts to each zone's width automatically
+      // The offset has to clear the clearance probe below, which samples `m` metres
+      // back TOWARD the road — park any closer than that to the edge and every
+      // candidate is rejected by its own road-side sample.
+      const MARGIN = 1.6
       let lat = 0
       for (let d = 5; d <= 13; d += 0.5) {
-        if (surfaceAt(px + nx * side * d, pz + nz * side * d) === 'offroad') { lat = d + 1.4; break }
+        if (surfaceAt(px + nx * side * d, pz + nz * side * d) === 'offroad') { lat = d + MARGIN + 0.4; break }
       }
       if (lat === 0) continue // never found an edge (junction mouth, plaza) — skip it
       const x = px + nx * side * lat, z = pz + nz * side * lat
       // the whole footprint must be off the road, not just the centre point
-      if (!clearOfRoadBy(x, z, 2.4) || inTacosTown(x, z, 10)) continue
+      if (!clearOfRoadBy(x, z, MARGIN) || inTacosTown(x, z, 10)) continue
+      // Spacing: well clear of anything car-sized (so two cars never share a verge and
+      // the village's own driveway cars keep their space), but only clear of a TRUNK by
+      // enough not to intersect it — parking under the treeline is the point, and
+      // holding 7 m off every big tree rejected most of the verge on this map.
       let blocked = false
       for (const p of props) {
-        if (p.kind !== 'parked' && p.kind !== 'house' && p.kind !== 'wreck' && p.kind !== 'tree_big') continue
-        if ((p.x - x) ** 2 + (p.z - z) ** 2 < 7 * 7) { blocked = true; break }
+        const near = p.kind === 'parked' || p.kind === 'house' || p.kind === 'wreck' ? 6 : p.kind === 'tree_big' ? 3 : 0
+        if (near && (p.x - x) ** 2 + (p.z - z) ** 2 < near * near) { blocked = true; break }
       }
       if (blocked) continue
       // nose along the road, ±8° of slop so the row doesn't look surveyed in

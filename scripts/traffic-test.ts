@@ -19,6 +19,9 @@ function spawn(): { brain: TrafficBrain; car: CarState }[] {
   })
 }
 const gapOf = (a: CarState, b: CarState) => Math.hypot(a.x - b.x, a.z - b.z)
+// Direction is no longer a property of the driver — each picks its own way at every
+// junction — so "same way" is measured off the cars' actual headings.
+const sameWay = (a: CarState, b: CarState) => Math.cos(a.yaw - b.yaw) > 0
 
 let failures = 0
 const check = (ok: boolean, label: string) => {
@@ -45,7 +48,7 @@ const check = (ok: boolean, label: string) => {
     for (let a = 0; a < cars.length; a++) {
       for (let b = a + 1; b < cars.length; b++) {
         contact = Math.max(contact, collideCarPair(cars[a].car, cars[b].car))
-        if (cars[a].brain.oncoming === cars[b].brain.oncoming) minGap = Math.min(minGap, gapOf(cars[a].car, cars[b].car))
+        if (sameWay(cars[a].car, cars[b].car)) minGap = Math.min(minGap, gapOf(cars[a].car, cars[b].car))
       }
     }
     if (i > 120) for (const t of cars) { minS = Math.min(minS, t.car.speed); maxS = Math.max(maxS, t.car.speed) }
@@ -66,7 +69,7 @@ const check = (ok: boolean, label: string) => {
   const cars = spawn()
   const t = cars[0]
   // drop a parked player ~30 m down the lane the first driver is about to drive
-  const wp = t.brain.path[(t.brain.wpIndex + 10) % t.brain.path.length]
+  const wp = t.brain.route.path[t.brain.route.wpIndex + 10]
   const parked = makeCarState(wp.x, wp.z, t.car.yaw)
   const road = new Map<string, CarState>([[t.brain.id, t.car], ['p1', parked]])
   let contact = 0, minGap = Infinity, honks = 0, stoppedAt = -1
@@ -90,7 +93,7 @@ const check = (ok: boolean, label: string) => {
 {
   const cars = spawn()
   const t = cars[0]
-  const wp = t.brain.path[(t.brain.wpIndex + 8) % t.brain.path.length]
+  const wp = t.brain.route.path[t.brain.route.wpIndex + 8]
   const slow = makeCarState(wp.x, wp.z, t.car.yaw)
   const road = new Map<string, CarState>([[t.brain.id, t.car], ['p1', slow]])
   let contact = 0, minGap = Infinity
@@ -98,16 +101,16 @@ const check = (ok: boolean, label: string) => {
   // the traffic car's index instead makes it flee further ahead exactly as the car
   // catches up, so the car is never actually blocked and the case silently stops
   // testing anything — which is how it "passed" while measuring nothing.
-  let pIdx = (t.brain.wpIndex + 8) % t.brain.path.length
+  let pIdx = t.brain.route.wpIndex + 8
   for (let i = 0; i < 60 * 25; i++) {
-    const ahead = t.brain.path[(pIdx + 2) % t.brain.path.length]
+    const ahead = t.brain.route.path[pIdx + 2]
     const h = Math.atan2(ahead.x - slow.x, ahead.z - slow.z)
     slow.yaw = h
     slow.vx = Math.sin(h) * 4; slow.vz = Math.cos(h) * 4
     slow.x += slow.vx * PHYS_DT; slow.z += slow.vz * PHYS_DT
     slow.speed = 4
-    if (Math.hypot(slow.x - t.brain.path[pIdx].x, slow.z - t.brain.path[pIdx].z) < 2.5) {
-      pIdx = (pIdx + 1) % t.brain.path.length
+    if (Math.hypot(slow.x - t.brain.route.path[pIdx].x, slow.z - t.brain.route.path[pIdx].z) < 2.5) {
+      pIdx++
     }
     const r = stepTrafficBrain(t.brain, t.car, road, PHYS_DT)
     step(t.car, r.input)
@@ -127,7 +130,7 @@ const check = (ok: boolean, label: string) => {
   for (const label of ['parked player', 'frozen cop'] as const) {
     const cars = spawn()
     const t = cars[0]
-    const wp = t.brain.path[(t.brain.wpIndex + 10) % t.brain.path.length]
+    const wp = t.brain.route.path[t.brain.route.wpIndex + 10]
     const dead = makeCarState(wp.x, wp.z, t.car.yaw)
     // an npc obstacle is never honked at — that's the frozen-cop case
     const id = label === 'frozen cop' ? 'npc:cop' : 'p1'
@@ -164,10 +167,20 @@ const check = (ok: boolean, label: string) => {
   const brain = makeCopBrain(map, 'npc:cop0', 0)
   const s0 = copSpawn(brain)
   const cop = makeCarState(s0.x, s0.z, s0.yaw)
-  // rewind him ~14 m up the lane from the first civilian, already at patrol speed
+  // Rewind him ~14 m up the lane from the first civilian, already at patrol speed.
+  // He has to be put on the civilian's ROUTE, not just its position: drivers now pick
+  // their own way at each junction, so a cop who merely starts behind one parts company
+  // with it at the first T and the case stops testing anything. Copying the route
+  // wholesale — including the RNG state — makes them take the same turns all the way,
+  // because route choice is a pure function of that seed.
   const lead = cars[0]
-  brain.wpIndex = (lead.brain.wpIndex - 5 + brain.path.length) % brain.path.length
-  const w = brain.path[brain.wpIndex]
+  brain.route = {
+    ...lead.brain.route,
+    path: [...lead.brain.route.path],
+    segs: lead.brain.route.segs.map((s) => ({ ...s })),
+    wpIndex: Math.max(0, lead.brain.route.wpIndex - 5),
+  }
+  const w = brain.route.path[brain.route.wpIndex]
   cop.x = w.x
   cop.z = w.z
   cop.yaw = lead.car.yaw
@@ -206,7 +219,7 @@ const check = (ok: boolean, label: string) => {
     const s0 = copSpawn(brain)
     const cop = makeCarState(s0.x, s0.z, s0.yaw)
     // a player stopped on the ring, ~25 m down the lane from where he starts
-    const wp = brain.path[(brain.wpIndex + 9) % brain.path.length]
+    const wp = brain.route.path[brain.route.wpIndex + 9]
     const p = makeCarState(wp.x, wp.z, cop.yaw)
     const players = new Map<string, CarState>([['p1', p]])
     if (mode === 'in pursuit') { brain.mode = 'pursuit'; brain.targetId = 'p1' }
@@ -275,7 +288,7 @@ const check = (ok: boolean, label: string) => {
   for (const [d, turn] of cases) {
     // one car, built explicitly: using spawn()[0] made this case silently re-roll every
     // time TRAFFIC_COUNT changed, because the spread puts car 0 somewhere else on the map
-    const brain = makeTrafficBrains(map, 1, 0)[0]
+    const brain = makeTrafficBrains(map, 1)[0]
     const w0 = trafficSpawn(brain)
     const t = { brain, car: makeCarState(w0.x, w0.z, w0.yaw) }
     const road = new Map<string, CarState>([[t.brain.id, t.car]])
@@ -335,8 +348,6 @@ const check = (ok: boolean, label: string) => {
 {
   const cars = spawn()
   const road = new Map(cars.map((t) => [t.brain.id, t.car] as const))
-  const withLoop = cars.filter((t) => !t.brain.oncoming)
-  const against = cars.filter((t) => t.brain.oncoming)
   let contact = 0, minGap = Infinity, passes = 0, yieldedToOncoming = 0
   const travelled = cars.map(() => 0)
   const prevPos = cars.map((t) => ({ x: t.car.x, z: t.car.z }))
@@ -353,11 +364,15 @@ const check = (ok: boolean, label: string) => {
         contact = Math.max(contact, collideCarPair(cars[a].car, cars[b].car))
       }
     }
-    // count head-on passes and watch the gap/speed only while actually meeting someone
-    for (const w of withLoop) {
-      for (const o of against) {
-        const g = gapOf(w.car, o.car)
-        const key = w.brain.id + o.brain.id
+    // Count head-on passes and watch the gap only while actually meeting someone.
+    // Which cars oppose each other is now a moment-to-moment fact about their headings
+    // rather than a fixed roster, so every pair is tested and the ones pointing at each
+    // other are the ones that count.
+    for (let a = 0; a < cars.length; a++) {
+      for (let b = a + 1; b < cars.length; b++) {
+        if (sameWay(cars[a].car, cars[b].car)) continue
+        const g = gapOf(cars[a].car, cars[b].car)
+        const key = cars[a].brain.id + cars[b].brain.id
         if (g < 14) {
           minGap = Math.min(minGap, g)
           if (!wasNear.has(key)) { wasNear.add(key); passes++ }
@@ -369,15 +384,14 @@ const check = (ok: boolean, label: string) => {
       for (const t of cars) {
         // must mirror exactly what the brain asks for, lane and all — calling the bare
         // cone here measures a code path the AI no longer uses
-        const ob = carAhead(t.car, road, 26, { path: t.brain.path, from: t.brain.wpIndex })
+        const ob = carAhead(t.car, road, 26, { path: t.brain.route.path, from: t.brain.route.wpIndex })
         if (!ob) continue
         const other = cars.find((c) => c.brain.id === ob.id)
-        if (other && other.brain.oncoming !== t.brain.oncoming) yieldedToOncoming++
+        if (other && !sameWay(other.car, t.car)) yieldedToOncoming++
       }
     }
   }
-  console.log(`two-way 120s: ${withLoop.length} with the loop, ${against.length} against · ${passes} head-on passes · closest ${minGap.toFixed(1)}m · yielded to the far lane ${(yieldedToOncoming / 60).toFixed(1)}s · travelled ${travelled.map((m) => m.toFixed(0)).join('/')}m · contact ${contact.toFixed(2)}`)
-  check(against.length > 0, 'some civilians actually drive the other way')
+  console.log(`two-way 120s: ${passes} head-on passes · closest ${minGap.toFixed(1)}m · yielded to the far lane ${(yieldedToOncoming / 60).toFixed(1)}s · travelled ${travelled.map((m) => m.toFixed(0)).join('/')}m · contact ${contact.toFixed(2)}`)
   check(passes > 5, 'the two directions genuinely meet, so this case tests something')
   check(contact === 0, 'oncoming cars pass without touching')
   // Centre distance is the wrong metric for two cars passing side by side — at the

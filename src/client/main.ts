@@ -17,7 +17,7 @@ import { GameAudio } from './audio/engine'
 import { parseMap } from '../shared/map'
 import { makeCarState, stepCar, copyCarState, collideCarKinematic, CarState, InputFrame } from '../shared/physics'
 import { InputShaper, RawInput } from '../shared/input'
-import { TUNING, PHYS_DT, CAR_WIDTH, CAR_LENGTH } from '../shared/constants'
+import { TUNING, PHYS_DT, CAR_WIDTH, CAR_LENGTH, Tuning } from '../shared/constants'
 import { makeScore, stepScore } from '../shared/scoring'
 import { NetClient, RemotePlayer } from './net/net'
 import { CARS, DEFAULT_CAR, PLAYABLE, WRECK_CAR, carTuning } from '../shared/cars'
@@ -27,28 +27,94 @@ import { PIN_TIME } from '../shared/police'
 let chosenCar = DEFAULT_CAR
 let playerName = 'driver'
 
+// Handles the name field is pre-filled with, one drawn per load. Nobody wants to name
+// themselves before they've driven anything, and "driver" over every car made a full
+// room look like a test harness. Kept to CB-handle territory — short, shouted, and
+// legible in the 11px tag that floats over the car.
+const HANDLES = ['DUKE', 'LIGHTNING', 'BANDIT', 'MAVERICK', 'GHOST', 'NITRO', 'ACE', 'RHINO', 'BLITZ', 'VIPER']
+
+// Menu stat bars — six blocks each. The garage is defined by physics multipliers, not by
+// a stat sheet, so the ratings are DERIVED from the merged tuning: a handling pass can
+// never leave the menu lying about a car.
+const STAT_BLOCKS = 6
+const CAR_STATS: { label: string; of: (t: Tuning) => number }[] = [
+  { label: 'TOP SPEED', of: (t) => t.maxSpeed },
+  { label: 'ACCEL', of: (t) => t.engineForce / t.mass },
+  { label: 'BRAKING', of: (t) => t.brakeForce / t.mass },
+  // turn-in: steering rate and front bite against how hard the body is to rotate
+  { label: 'HANDLING', of: (t) => (t.steerAttack * t.gripFront * t.mass) / t.inertia },
+  // how planted it is — axle grip penalised by ride height (weight transfer). Square root
+  // because a raw cgHeight divide dominated the axle grips and squashed the tall cars flat.
+  { label: 'GRIP', of: (t) => (t.gripFront + t.gripRear) / 2 / Math.sqrt(t.cgHeight) },
+]
+
+// Each stat is scored as a ratio to the ESTATE baseline, then mapped onto fixed anchors
+// (half the estate = 1 block, a third above it = 6). NOT min/maxed across the garage: the
+// box van is last in every category, so min/max pinned all six of its bars to one block.
+const STAT_LO = 0.5
+const STAT_HI = 1.35
+
+function carStatBlocks(car: number): number[] {
+  const base = carTuning(DEFAULT_CAR)
+  const mine = carTuning(car)
+  return CAR_STATS.map((s) => {
+    const ratio = s.of(mine) / s.of(base)
+    const n = Math.round((STAT_BLOCKS * (ratio - STAT_LO)) / (STAT_HI - STAT_LO))
+    return Math.max(1, Math.min(STAT_BLOCKS, n))
+  })
+}
+
+// Rows are built once and selection only toggles the .on class, so blocks light up in
+// place rather than the whole panel being torn down and rebuilt on every click.
+function carStatsMarkup(): string {
+  const cells = '<b></b>'.repeat(STAT_BLOCKS)
+  return CAR_STATS.map((s) => `<div class="s"><u>${s.label}</u><div class="bar">${cells}</div></div>`).join('')
+}
+
+function updateCarStats(el: HTMLElement, car: number): void {
+  const rows = el.querySelectorAll<HTMLElement>('.bar')
+  carStatBlocks(car).forEach((lit, n) => {
+    rows[n]?.querySelectorAll('b').forEach((cell, i) => cell.classList.toggle('on', i < lit))
+  })
+}
+
 function showJoin(): Promise<void> {
   if (new URLSearchParams(location.search).has('auto')) return Promise.resolve()
   return new Promise((resolve) => {
     const el = document.createElement('div')
     el.id = 'join'
+    const suggested = HANDLES[Math.floor(Math.random() * HANDLES.length)]
     el.innerHTML = `
       <div class="spacer"></div>
-      <div class="row"><span>NAME</span><input id="name" maxlength="16" placeholder="driver" /></div>
+      <div class="row"><span>NAME</span><input id="name" maxlength="16" placeholder="driver" value="${suggested}" /></div>
       <div class="cars">${PLAYABLE.map((i) => { const c = CARS[i]; return `<button data-i="${i}" class="${i === DEFAULT_CAR ? 'sel' : ''}"><i style="background:${c.swatch}"></i>${c.label}</button>` }).join('')}</div>
+      <div class="stats" id="car-stats">${carStatsMarkup()}</div>
       <button id="start">DRIVE</button>
       <div class="status" id="join-status"></div>
     `
     document.body.appendChild(el)
+    const stats = el.querySelector<HTMLElement>('#car-stats')!
+    updateCarStats(stats, DEFAULT_CAR)
+    // The suggested handle is real text, not a placeholder, so it survives to the room
+    // if you never touch the field. Selecting it on the first click means typing just
+    // replaces it — otherwise you'd land a caret mid-word and have to clear it yourself.
+    const nameEl = el.querySelector<HTMLInputElement>('#name')!
+    let claimed = false
+    nameEl.addEventListener('focus', () => {
+      if (claimed) return
+      claimed = true
+      nameEl.select()
+    })
     el.querySelectorAll('.cars button').forEach((b) => {
       b.addEventListener('click', () => {
         el.querySelectorAll('.cars button').forEach((x) => x.classList.remove('sel'))
         b.classList.add('sel')
         chosenCar = parseInt((b as HTMLElement).dataset.i!)
+        updateCarStats(stats, chosenCar)
       })
     })
     const start = () => {
-      playerName = (document.getElementById('name') as HTMLInputElement).value.trim() || 'driver'
+      playerName = nameEl.value.trim() || suggested // cleared the field? take the handle back
       el.remove()
       window.removeEventListener('keydown', onKey)
       resolve()
@@ -92,9 +158,14 @@ async function boot(): Promise<void> {
   scene.add(world.group)
   scene.add(buildLampGlows(map.lamps, map.mistAt, map.heightAt))
 
-  // parked cars (dressing)
+  // Parked cars (dressing). Loaded concurrently — there are ~20 of them now, and
+  // awaiting each OBJ in turn put the whole boot behind a serial chain of fetches.
+  // Each still gets its own load rather than a clone of a shared prototype: the PSX
+  // material patch is applied per material instance, and cloning would hand every
+  // car the same materials, so the per-position lamp tint below would bleed between
+  // cars parked under different lamps.
   const parked = map.props.filter((p) => p.kind === 'parked')
-  for (const p of parked) {
+  await Promise.all(parked.map(async (p) => {
     const model = await loadCar(0, p.variant)
     model.group.position.set(p.x, map.heightAt(p.x, p.z), p.z)
     model.group.rotation.y = p.rot
@@ -102,7 +173,7 @@ async function boot(): Promise<void> {
     world.lampTintAt(p.x, p.z, tint)
     for (const m of model.tintables) m.color.copy(tint)
     scene.add(model.group)
-  }
+  }))
 
   // the retired coupe, dumped in the clearing off the dirt road. Same loader as a
   // playable car (it IS one of the CARS entries, just flagged wreck) but canted on
@@ -327,8 +398,12 @@ async function boot(): Promise<void> {
   let lastResetAt = -10
 
   function resetCar(): void {
+    if (frozen) return // pulled over — R is not a way out of the conversation
     if (perfNow() - lastResetAt < 3) return
     lastResetAt = perfNow()
+    // Online the server owns the car: without this the snap below is undone within a
+    // frame or two by reconcile(), which is why R appeared to do nothing in a room.
+    net.reset()
     // snap to nearest road tile center, aligned to one of its arms
     let best = map.tiles[0]
     let bestD = Infinity

@@ -13,7 +13,7 @@ const s0 = copSpawn(brain)
 const cop = makeCarState(s0.x, s0.z, s0.yaw)
 const players = new Map<string, CarState>()
 
-console.log(`patrol ring: ${brain.path.length} waypoints`)
+console.log(`patrol route: ${brain.route.path.length} waypoints buffered`)
 
 // --- 1) patrol: drives the loop without wedging ---
 let minS = 99, maxS = 0
@@ -25,7 +25,7 @@ for (let i = 0; i < 60 * 30; i++) {
   if (i > 120) { minS = Math.min(minS, cop.speed); maxS = Math.max(maxS, cop.speed) }
   if (brain.reverseT > 0) stuckEvents++
 }
-console.log(`patrol 30s: ${(minS * 3.6).toFixed(0)}..${(maxS * 3.6).toFixed(0)} km/h · moved ${Math.hypot(cop.x - start.x, cop.z - start.z).toFixed(0)}m · wp ${brain.wpIndex}/${brain.path.length} · reverse-recovery frames ${stuckEvents} · mode=${brain.mode}`)
+console.log(`patrol 30s: ${(minS * 3.6).toFixed(0)}..${(maxS * 3.6).toFixed(0)} km/h · moved ${Math.hypot(cop.x - start.x, cop.z - start.z).toFixed(0)}m · wp ${brain.route.wpIndex}/${brain.route.path.length} · reverse-recovery frames ${stuckEvents} · mode=${brain.mode}`)
 
 // --- 2) aggro: player rams the patrol car (drive in until contact, like the room does) ---
 const fwd = { x: Math.sin(cop.yaw), z: Math.cos(cop.yaw) }

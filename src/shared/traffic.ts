@@ -21,13 +21,15 @@ import { TILE } from './constants'
 import {
   Waypoint, clamp, wrapAngle, dist, steerToward, speedControl, pointAhead, carAhead, followSpeed,
 } from './driving'
-import { buildPatrolPath } from './police'
+import {
+  RoadGraph, Route, buildRoadGraph, seatRoute, resetRoute, extendRoute, trimRoute,
+  nearestOnGraph, routeSpawn, junctionAhead, junctionYield,
+} from './roadgraph'
 
 export interface TrafficBrain {
   id: string
-  oncoming: boolean // drives the loop the other way, on the other side of the road
-  path: Waypoint[]
-  wpIndex: number
+  graph: RoadGraph // shared reference — the network these drivers route over
+  route: Route // rolling path; re-chosen at every junction
   cruise: number // m/s free-flow speed for this driver
   tick: number
   blockedT: number // s held up by something in the lane ahead
@@ -37,15 +39,21 @@ export interface TrafficBrain {
   stuckTries: number
   reverseT: number
   wedgeT: number
+  jamT: number // s held at a give-way line — breaks a mutual stand-off
   lastX: number
   lastZ: number
 }
 
-// Seven on an 844 m loop: you meet someone every couple of corners without them ever
-// forming a rolling roadblock. Split so most run with the loop and a few come the other
-// way — oncoming headlights are most of what makes the road feel inhabited at night.
-export const TRAFFIC_COUNT = 7
-export const ONCOMING_COUNT = 3
+// Seven was tuned for one 844 m ring. The drivable network is now ~2.4 km once the
+// highway and the town grid are in it, and seven cars spread over that met you about
+// once a lap — the road read as empty. Fourteen restores roughly the old density per
+// metre of road while covering three times as much of it.
+//
+// There is no oncoming split any more. Direction used to be a property of the driver
+// because there was one ring and someone had to drive it backwards; now each picks its
+// own way at every junction, so both directions fall out of route choice for free, and
+// the lane offset (right of TRAVEL) puts opposing cars on opposite sides automatically.
+export const TRAFFIC_COUNT = 14
 // Just under the cop's 13 m/s patrol, so he's always the faster car on the road but
 // closes at ~1 m/s and only rarely ends up queued behind one. Dropping this to 10 put
 // him within 25 m of a civilian for 178 s of a 300 s patrol — technically correct,
@@ -72,25 +80,18 @@ const UNSEEN_DIST = 70
 export function makeTrafficBrains(
   map: ParsedMap,
   count = TRAFFIC_COUNT,
-  oncomingCount = ONCOMING_COUNT,
+  graph: RoadGraph = buildRoadGraph(map),
 ): TrafficBrain[] {
-  const withLoop = buildPatrolPath(map)
-  const against = buildPatrolPath(map, true)
+  // Spread them over every edge in the network rather than one ring, so the village,
+  // the highway and the town all start with cars on them instead of the whole shift
+  // filing out of the same corner.
+  const edgeIds = [...graph.edges.keys()]
   const out: TrafficBrain[] = []
-  const nWith = Math.max(0, count - oncomingCount)
   for (let i = 0; i < count; i++) {
-    const oncoming = i >= nWith
-    const path = oncoming ? against : withLoop
-    // spread each direction evenly along ITS OWN path, so neither lane spawns
-    // nose-to-tail (and nobody lands on the cop, who starts at index 0 of the with-loop
-    // ring). Counted within the direction, not across both.
-    const seat = oncoming ? i - nWith : i
-    const seats = oncoming ? oncomingCount : nWith
     out.push({
       id: `npc:car${i}`,
-      oncoming,
-      path,
-      wpIndex: Math.floor((path.length * (seat + 0.5)) / Math.max(1, seats)),
+      graph,
+      route: seatRoute(graph, i, count, edgeIds, 0x51ed),
       cruise: CRUISE[i % CRUISE.length],
       tick: 0,
       blockedT: 0,
@@ -100,6 +101,7 @@ export function makeTrafficBrains(
       stuckTries: 0,
       reverseT: 0,
       wedgeT: 0,
+      jamT: 0,
       lastX: 0,
       lastZ: 0,
     })
@@ -107,39 +109,36 @@ export function makeTrafficBrains(
   return out
 }
 
-// Lift the car back onto the ring, facing along it. Shared by the wedge watchdog and
+// Lift the car back onto the road, facing along it. Shared by the wedge watchdog and
 // the stranded-offroad give-up — both are "this driver is beyond self-help".
+//
+// It rejoins at the nearest point on the NETWORK, not the nearest point on its own
+// route. A car that has been punted across a field may be nowhere near the road it was
+// following, and snapping it back to a stale route would drag it across the map; it
+// picks up whatever road it actually landed beside and gets a fresh route from there.
 function relocate(brain: TrafficBrain, self: CarState): void {
-  const n = brain.path.length
-  let best = 0
-  let bestD = Infinity
-  for (let k = 0; k < n; k++) {
-    const d = dist(self.x, self.z, brain.path[k].x, brain.path[k].z)
-    if (d < bestD) { bestD = d; best = k }
-  }
-  const a = brain.path[best]
-  const b = brain.path[(best + 1) % n]
-  self.x = a.x
-  self.z = a.z
-  self.yaw = Math.atan2(b.x - a.x, b.z - a.z)
+  const near = nearestOnGraph(brain.graph, self.x, self.z)
+  resetRoute(brain.route, brain.graph, near.edgeId, near.frac)
+  const s = routeSpawn(brain.route)
+  self.x = s.x
+  self.z = s.z
+  self.yaw = s.yaw
   self.vx = 0
   self.vz = 0
   self.yawRate = 0
-  brain.wpIndex = (best + 1) % n
   brain.lastX = self.x
   brain.lastZ = self.z
   brain.wedgeT = 0
   brain.stuckT = 0
   brain.reverseT = 0
   brain.offroadT = 0
+  brain.jamT = 0
 }
 
-// On the ring, already facing along it — same reason the cop needs this: yaw 0 points
+// On the road, already facing along it — same reason the cop needs this: yaw 0 points
 // at whatever the map's +z happens to be, which is usually a hedge.
 export function trafficSpawn(brain: TrafficBrain): { x: number; z: number; yaw: number } {
-  const a = brain.path[brain.wpIndex]
-  const b = brain.path[(brain.wpIndex + 1) % brain.path.length]
-  return { x: a.x, z: a.z, yaw: Math.atan2(b.x - a.x, b.z - a.z) }
+  return routeSpawn(brain.route)
 }
 
 export interface TrafficStepResult {
@@ -158,6 +157,7 @@ export function stepTrafficBrain(
 ): TrafficStepResult {
   brain.tick++
   brain.honkCd = Math.max(0, brain.honkCd - dt)
+  const route = brain.route
 
   const input: InputFrame = {
     seq: brain.tick,
@@ -169,7 +169,7 @@ export function stepTrafficBrain(
   }
 
   // --- who's in the way ---
-  const ob = carAhead(self, others, 26, { path: brain.path, from: brain.wpIndex })
+  const ob = carAhead(self, others, 26, { path: route.path, from: route.wpIndex })
   const yieldTo = ob ? followSpeed(self, ob) : Infinity
   const blocked = yieldTo < brain.cruise - 0.5
   brain.blockedT = blocked ? brain.blockedT + dt : 0
@@ -242,14 +242,14 @@ export function stepTrafficBrain(
   // country instead of rejoining the lane it fell out of. Steering and throttle are both
   // capped — see the constants; asking for everything is what pins it at 0.09 m/s.
   if (stranded) {
-    let best = brain.wpIndex
+    let best = route.wpIndex
     let bestD = Infinity
-    for (let k = 0; k < brain.path.length; k++) {
-      const d = dist(self.x, self.z, brain.path[k].x, brain.path[k].z)
+    for (let k = 0; k < route.path.length; k++) {
+      const d = dist(self.x, self.z, route.path[k].x, route.path[k].z)
       if (d < bestD) { bestD = d; best = k }
     }
-    brain.wpIndex = best
-    const w = brain.path[best]
+    route.wpIndex = best
+    const w = route.path[best]
     const ang = wrapAngle(Math.atan2(w.x - self.x, w.z - self.z) - self.yaw)
     if (Math.abs(ang) > OFFROAD_REORIENT) {
       // Pointing the wrong way: reverse to swing the nose round rather than trying to
@@ -285,7 +285,7 @@ export function stepTrafficBrain(
   if (brain.reverseT > 0) {
     brain.reverseT -= dt
     input.brake = 1 // full: brake past standstill = reverse in this physics
-    const wp0 = brain.path[brain.wpIndex]
+    const wp0 = route.path[route.wpIndex]
     input.steer = (brain.stuckTries % 2 === 0 ? -1 : 1) * Math.abs(steerToward(self, wp0.x, wp0.z)) || 0.6
     return { input, honk }
   }
@@ -301,33 +301,46 @@ export function stepTrafficBrain(
   }
 
   // --- lane following ---
-  let wp = brain.path[brain.wpIndex]
+  let wp = route.path[route.wpIndex]
   const reached = (w: Waypoint): boolean => {
     const d = dist(self.x, self.z, w.x, w.z)
     if (d < 2.6) return true
     const behind = (w.x - self.x) * Math.sin(self.yaw) + (w.z - self.z) * Math.cos(self.yaw) < 0
     return behind && d < TILE * 0.5
   }
-  for (let guard = 0; guard < 4 && reached(wp); guard++) {
-    brain.wpIndex = (brain.wpIndex + 1) % brain.path.length
-    wp = brain.path[brain.wpIndex]
+  for (let guard = 0; guard < 4 && reached(wp) && route.wpIndex < route.path.length - 1; guard++) {
+    route.wpIndex++
+    wp = route.path[route.wpIndex]
   }
+  // keep road ahead of us and drop what's behind — the route is rolling, not a ring
+  extendRoute(route, brain.graph)
+  trimRoute(route)
 
   // slow for what's coming, over a speed-scaled window of the path
-  const np = brain.path.length
+  const np = route.path.length
   const look = clamp(Math.ceil((Math.abs(self.speed) * 1.8) / 3), 2, 10)
   let curve = 0
   let prevH = Math.atan2(wp.x - self.x, wp.z - self.z)
   for (let k = 1; k <= look; k++) {
-    const a = brain.path[(brain.wpIndex + k - 1) % np]
-    const b = brain.path[(brain.wpIndex + k) % np]
+    const a = route.path[Math.min(route.wpIndex + k - 1, np - 1)]
+    const b = route.path[Math.min(route.wpIndex + k, np - 1)]
     const h = Math.atan2(b.x - a.x, b.z - a.z)
     curve += Math.abs(wrapAngle(h - prevH))
     prevH = h
   }
-  const target = Math.min(brain.cruise * clamp(1 - curve * 0.3, 0.42, 1), yieldTo)
 
-  const aim = pointAhead(brain.path, brain.wpIndex, self, clamp(5 + Math.abs(self.speed) * 0.85, 6, 20))
+  // --- give way at the junction ahead ---
+  // Only ever bites on the terminating arm of a T or at an all-way in town, and only
+  // when something is actually coming — a driver on the through road carries on as
+  // before. jamT is the stand-off breaker; see junctionYield.
+  const jn = junctionAhead(route, brain.graph, self.x, self.z)
+  const junctionCap = jn ? junctionYield(jn, brain.id, self, others, brain.jamT) : Infinity
+  if (junctionCap < 0.5 && Math.abs(self.speed) < 1) brain.jamT += dt
+  else if (junctionCap === Infinity) brain.jamT = 0
+
+  const target = Math.min(brain.cruise * clamp(1 - curve * 0.3, 0.42, 1), yieldTo, junctionCap)
+
+  const aim = pointAhead(route.path, route.wpIndex, self, clamp(5 + Math.abs(self.speed) * 0.85, 6, 20))
   input.steer = steerToward(self, aim.x, aim.z)
   const sc = speedControl(self, target)
   input.throttle = sc.throttle
@@ -356,6 +369,13 @@ export function stepTrafficBrain(
   if (ob && ob.gap < 4 && self.speed > 0.05) {
     input.throttle = 0
     input.brake = self.speed > 0.5 ? 1 : 0.5 // enough to hold a hill, not enough to reverse off it
+  }
+  // Same hold at a give-way line, and for the same reason: speedControl won't brake
+  // below 1 m/s, so a car "stopped" at a junction still rolls into it at walking pace —
+  // which is the one place that turns a correct stop into a T-bone.
+  if (junctionCap < 0.5 && self.speed > 0.05) {
+    input.throttle = 0
+    input.brake = self.speed > 0.5 ? 1 : 0.5
   }
   return { input, honk }
 }

@@ -145,6 +145,11 @@ export class NetClient {
     this.room?.send('cop:give-in')
   }
 
+  // R — the server owns the teleport; the local snap is only for instant feedback
+  reset(): void {
+    this.room?.send('reset')
+  }
+
   // reconcile local prediction against the latest server state; returns true if corrected
   reconcile(car: CarState): void {
     if (!this.room || !this.connected) return

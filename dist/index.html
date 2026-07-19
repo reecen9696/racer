@@ -66,10 +66,14 @@
     #debug-panel input[type=range] { width: 100%; accent-color: #b8743a; height: 12px; }
     #debug-panel span { text-align: right; color: #7fd4ff; }
 
-    #join { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; background: #05060d url('/join-bg.png') center / cover no-repeat; font-family: var(--pix); z-index: 30; }
-    #join .spacer { flex: 0 0 30vh; } /* the artwork carries the title — push the form below it */
-    #join .row { display: flex; gap: 10px; align-items: center; color: #aeb3d0; font-size: 13px; }
-    #join input { background: #0a0d1f; border: 1px solid #2a2f4a; color: #cfd2e8; padding: 8px 10px; font-family: var(--pix); font-size: 14px; width: 180px; }
+    #join { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; background: #05060d url('/join-bg.png') center / cover no-repeat; font-family: var(--pix); z-index: 30; }
+    #join .spacer { flex: 0 0 17vh; } /* the artwork carries the title — push the form below it */
+    /* same frame and label column as the stat sheet below, so the form reads as one panel */
+    #join .row { width: min(560px, 92vw); box-sizing: border-box; display: grid; grid-template-columns: 92px 1fr; gap: 12px; align-items: center;
+      background: rgba(6,8,18,.82); border: 1px solid #2a2f4a; padding: 12px 14px; }
+    #join .row span { font-size: 9px; letter-spacing: 2px; color: #7a80a4; }
+    #join input { background: #0a0d1f; border: 1px solid #2a2f4a; color: #cfd2e8; padding: 8px 10px; font-family: var(--pix); font-size: 14px; width: 100%; box-sizing: border-box; }
+    #join input:focus { outline: none; border-color: #5a3f82; color: #e6dcff; }
     /* car picker: swatch chip + name, two rows of four */
     #join .cars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: min(560px, 92vw); }
     #join .cars button { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer;
@@ -78,11 +82,20 @@
     #join .cars button i { width: 14px; height: 14px; flex: 0 0 14px; border: 1px solid rgba(0,0,0,.6); }
     #join .cars button:hover { border-color: #5a3f82; color: #cbb8ef; }
     #join .cars button.sel { border-color: #ffd28a; color: #ffd28a; background: rgba(53,32,79,.75); }
+    /* stat sheet for the selected car — derived from its physics, see CAR_STATS in main.ts */
+    #join .stats { width: min(560px, 92vw); box-sizing: border-box; display: flex; flex-direction: column; gap: 6px;
+      background: rgba(6,8,18,.82); border: 1px solid #2a2f4a; padding: 12px 14px; }
+    #join .stats .s { display: grid; grid-template-columns: 92px 1fr; gap: 12px; align-items: center; }
+    #join .stats u { font-size: 9px; letter-spacing: 2px; color: #7a80a4; text-decoration: none; }
+    /* six blocks per stat — an arcade meter, not a progress bar */
+    #join .stats .bar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+    #join .stats .bar b { height: 11px; background: rgba(10,13,31,.9); border: 1px solid #2a2f4a; }
+    #join .stats .bar b.on { background: #4a2d71; border-color: #6a45a0; }
     #join #start { background: #35204f; color: #cbb8ef; border: 1px solid #5a3f82; padding: 12px 44px; font-family: var(--pix); font-size: 17px; letter-spacing: 4px; cursor: pointer; margin-top: 8px; }
     #join #start:hover { background: #4a2d71; color: #e6dcff; }
     #join .status { color: #62688a; font-size: 11px; height: 14px; }
   </style>
-  <script type="module" crossorigin src="/assets/index-CR-AInYr.js"></script>
+  <script type="module" crossorigin src="/assets/index-DW_5NV2U.js"></script>
 </head>
 <body>
   <canvas id="game"></canvas>

@@ -11,6 +11,18 @@ import { buildTacosTown } from './tacos'
 // Night ambient: never pure black — everything silhouettes against the sky.
 const AMBIENT = new THREE.Color(0.64, 0.68, 0.86)
 
+// terrain dips under the Tacos town footprint: its road mesh sits only a few cm
+// above the height field, and the PSX vertex snap makes coplanar surfaces
+// flicker-fight — feather the grass 40 cm down so the town always wins. Props
+// planted on town grass subtract this too, so they sit on the visible ground.
+function townDip(x: number, z: number): number {
+  const inside = Math.min(
+    x - (TACOS_TOWN.x + TACOS_BOUNDS.minX), TACOS_TOWN.x + TACOS_BOUNDS.maxX - x,
+    z - (TACOS_TOWN.z + TACOS_BOUNDS.minZ), TACOS_TOWN.z + TACOS_BOUNDS.maxZ - z,
+  )
+  return inside <= 0 ? 0 : 0.4 * Math.min(1, inside / 10)
+}
+
 // one instanced prop (e.g. a bush) with handles to every InstancedMesh slice of it —
 // fx code hides/regrows it by rescaling `orig` and rewriting the instance matrix
 export interface InstancedProp {
@@ -96,16 +108,6 @@ export class World {
     const colors = new Float32Array(pos.count * 3)
     const tint = new THREE.Color()
     const mx = 0.42, my = 0.78, mz = -0.46 // moon direction for baked slope shading
-    // terrain dips under the Tacos town footprint: its road mesh sits only a few
-    // cm above the height field, and the PSX vertex snap makes coplanar surfaces
-    // flicker-fight — feather the grass 40 cm down so the town always wins
-    const townDip = (x: number, z: number): number => {
-      const inside = Math.min(
-        x - (TACOS_TOWN.x + TACOS_BOUNDS.minX), TACOS_TOWN.x + TACOS_BOUNDS.maxX - x,
-        z - (TACOS_TOWN.z + TACOS_BOUNDS.minZ), TACOS_TOWN.z + TACOS_BOUNDS.maxZ - z,
-      )
-      return inside <= 0 ? 0 : 0.4 * Math.min(1, inside / 10)
-    }
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i)
       const h = this.map.heightAt(x, z)
@@ -327,7 +329,7 @@ export class World {
       props.forEach((p, i) => {
         const s2 = scale * (0.75 + hash2(Math.round(p.x * 7), Math.round(p.z * 7), 5) * 0.55)
         q.setFromAxisAngle(up, p.rot)
-        m.compose(new THREE.Vector3(p.x, this.map.heightAt(p.x, p.z), p.z), q, new THREE.Vector3(1, 1, 1))
+        m.compose(new THREE.Vector3(p.x, this.map.heightAt(p.x, p.z) - townDip(p.x, p.z), p.z), q, new THREE.Vector3(1, 1, 1))
         off.makeTranslation(-center.x * s2, -bbox.min.y * s2, -center.z * s2)
         sc.makeScale(s2, s2, s2)
         m.multiply(off)

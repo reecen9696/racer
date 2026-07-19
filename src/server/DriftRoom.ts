@@ -8,7 +8,8 @@ import { parseMap, ParsedMap, Zone } from '../shared/map'
 import { makeScore, stepScore, DriftScore } from '../shared/scoring'
 import { CARS, DEFAULT_CAR, carDef, carTuning, isPlayable } from '../shared/cars'
 import { makeCopBrain, stepCopBrain, onCopHit, joinPursuit, copSpawn, CopBrain, PIN_TIME, ARREST_IMMUNITY, COP_COUNT } from '../shared/police'
-import { makeTrafficBrains, stepTrafficBrain, trafficSpawn, TrafficBrain } from '../shared/traffic'
+import { makeTrafficBrains, stepTrafficBrain, trafficSpawn, TrafficBrain, TRAFFIC_COUNT } from '../shared/traffic'
+import { buildRoadGraph, RoadGraph } from '../shared/roadgraph'
 import { Interrogation, InterrogationFacts, CHAT_TIME_LIMIT_S } from './interrogation'
 import { officerAt } from './officers'
 // Civilian cars, in menu order — deliberately not the red estate most players drive,
@@ -60,6 +61,7 @@ interface Sim {
   queue: InputFrame[]
   lastInput: InputFrame
   lastSeen: number // ms — last input packet; drives the stale-client sweep
+  lastReset: number // ms — rate-limits the R key so it can't be used as a free teleport
 }
 
 // A cleanly closed tab fires onLeave via the socket close. A killed browser, a slept
@@ -67,6 +69,7 @@ interface Sim {
 // stranding a ghost car on the road (and the cop will happily pull one over). Sweep
 // anyone who has stopped talking to us.
 const STALE_MS = 20000
+const RESET_COOLDOWN_MS = 3000 // matches the client's own guard
 
 const COP_MODE_CODE: Record<CopBrain['mode'], number> = { patrol: 0, pursuit: 1, interrogate: 2, cooldown: 3 }
 
@@ -79,6 +82,7 @@ export class DriftRoom extends Room<DriftState> {
   maxClients = 8
   private sims = new Map<string, Sim>()
   private map!: ParsedMap
+  private graph!: RoadGraph
   private cops: Unit[] = []
   private traffic: { brain: TrafficBrain; car: CarState; tuning: Tuning }[] = []
   private interrogation: Interrogation | null = null
@@ -89,12 +93,15 @@ export class DriftRoom extends Room<DriftState> {
     this.setState(new DriftState())
     this.setPatchRate(50) // 20 Hz
     this.map = parseMap()
+    // One network for the whole room. Every AI driver routes over the same graph, so
+    // it is built once and handed to each brain rather than rebuilt per car.
+    this.graph = buildRoadGraph(this.map)
 
-    // --- the shift: three units, one officer each, spread round the patrol ring.
+    // --- the shift: three units, one officer each, spread over the network.
     // Each is a PlayerState like any other, so clients render them via the existing
     // remote-interpolation path; the bot/copMode flags do the rest ---
     for (let i = 0; i < COP_COUNT; i++) {
-      const brain = makeCopBrain(this.map, `npc:cop${i}`, i, i, COP_COUNT)
+      const brain = makeCopBrain(this.map, `npc:cop${i}`, i, i, COP_COUNT, this.graph)
       const w = copSpawn(brain)
       const car = makeCarState(w.x, w.z, w.yaw)
       const p = new PlayerState()
@@ -109,7 +116,7 @@ export class DriftRoom extends Room<DriftState> {
 
     // --- civilian traffic: same deal, minus the light bar. bot = 2 so the client
     // renders them as ordinary cars and the leaderboard leaves them out ---
-    for (const [i, brain] of makeTrafficBrains(this.map).entries()) {
+    for (const [i, brain] of makeTrafficBrains(this.map, TRAFFIC_COUNT, this.graph).entries()) {
       const w = trafficSpawn(brain)
       const car = makeCarState(w.x, w.z, w.yaw)
       const p = new PlayerState()
@@ -144,6 +151,19 @@ export class DriftRoom extends Room<DriftState> {
 
     this.onMessage('horn', (client) => {
       this.broadcast('horn', { id: client.sessionId }, { except: client })
+    })
+
+    // R — put a stranded driver back on the road. This HAS to be authoritative: the
+    // client teleporting its own car does nothing, because reconcile() rebases onto
+    // server state every frame and drags it straight back into the field it came from.
+    this.onMessage('reset', (client) => {
+      const sim = this.sims.get(client.sessionId)
+      if (!sim) return
+      if (client.sessionId === this.frozenId) return // not a way out of a traffic stop
+      const now = Date.now()
+      if (now - sim.lastReset < RESET_COOLDOWN_MS) return
+      sim.lastReset = now
+      this.snapToRoad(sim)
     })
 
     this.onMessage('cop:chat', async (client, text: string) => {
@@ -189,6 +209,7 @@ export class DriftRoom extends Room<DriftState> {
       queue: [],
       lastInput: { seq: 0, steer: 0, throttle: 0, brake: 0, handbrake: false, headlights: true },
       lastSeen: Date.now(),
+      lastReset: 0,
     })
   }
 
@@ -398,6 +419,31 @@ export class DriftRoom extends Room<DriftState> {
       p.brake = t.car.speed < 1 || t.brain.reverseT > 0 // brake lights when they're stopping for you
       p.headlights = true
     }
+  }
+
+  // Nearest road tile centre, aligned to one of its arms — the same rule the client
+  // applies locally for instant feedback, so the two agree and reconcile has nothing
+  // to correct. Breaks the drift chain but keeps banked points: being stuck in a
+  // hedge is not a reason to lose your session.
+  private snapToRoad(sim: Sim): void {
+    let best = this.map.tiles[0]
+    let bestD = Infinity
+    for (const t of this.map.tiles) {
+      const d = (t.x - sim.car.x) ** 2 + (t.z - sim.car.z) ** 2
+      if (d < bestD) {
+        bestD = d
+        best = t
+      }
+    }
+    sim.car.x = best.x
+    sim.car.z = best.z
+    sim.car.yaw = best.dirs.n || best.dirs.s ? 0 : Math.PI / 2
+    sim.car.vx = 0
+    sim.car.vz = 0
+    sim.car.yawRate = 0
+    sim.queue.length = 0 // queued inputs were aimed at the old position
+    sim.score.chain = 0
+    sim.score.multiplier = 1
   }
 
   private zoneNameAt(x: number, z: number): string {

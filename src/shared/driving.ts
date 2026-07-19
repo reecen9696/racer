@@ -43,18 +43,22 @@ export function speedControl(car: CarState, target: number): { throttle: number;
 // next waypoint: the samples are ~3 m apart, so aiming at the nearest one is a 0.2 s
 // lookahead at patrol speed — the driver saws at the wheel and washes wide out of every
 // corner. Roughly a second of travel tracks the ring cleanly at 47 km/h.
+// Indices CLAMP at the end of the path rather than wrapping. These were ring helpers,
+// where `% n` correctly meant "carry on round"; drivers now follow a rolling route, and
+// wrapping there would aim at wherever the route happened to start — half the map away
+// and usually behind the car. extendRoute keeps more path ahead than this ever reads.
 export function pointAhead(path: Waypoint[], from: number, car: CarState, ahead: number): Waypoint {
   const n = path.length
   let acc = 0
   let px = car.x, pz = car.z
   for (let k = 0; k < 30; k++) {
-    const w = path[(from + k) % n]
+    const w = path[Math.min(from + k, n - 1)]
     acc += dist(px, pz, w.x, w.z)
     if (acc >= ahead) return w
     px = w.x
     pz = w.z
   }
-  return path[(from + 29) % n]
+  return path[Math.min(from + 29, n - 1)]
 }
 
 export interface Obstacle {
@@ -101,7 +105,7 @@ export function carAhead(
       const n = lane.path.length
       let near2 = Infinity
       for (let k = 0; k < LANE_WINDOW; k++) {
-        const w = lane.path[(lane.from + k) % n]
+        const w = lane.path[Math.min(lane.from + k, n - 1)]
         const ex = o.x - w.x, ez = o.z - w.z
         const d2 = ex * ex + ez * ez
         if (d2 < near2) near2 = d2

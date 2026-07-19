@@ -7,7 +7,7 @@
 // own road mesh exactly like they do on the village asphalt.
 import * as THREE from 'three'
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
-import { TACOS_TOWN } from '../../shared/map'
+import { TACOS_TOWN, TACOS_CORNERS } from '../../shared/map'
 import { TACOS_HIDDEN } from '../../shared/tacosTown.generated'
 import { patchMaterial, psxTexture } from '../renderer/patch'
 import type { World } from './world'
@@ -92,6 +92,29 @@ export async function buildTacosTown(world: World): Promise<void> {
   fbx.position.set(TACOS_TOWN.x, TACOS_TOWN.y, TACOS_TOWN.z)
   world.group.add(fbx)
   fbx.updateMatrixWorld(true)
+
+  // the ring streets never connect at the four outer corners — lay tiling
+  // asphalt quads there (flush with the model's road tops; the corridor bands
+  // already make these rects drivable asphalt)
+  for (const c of TACOS_CORNERS) {
+    const w = c.maxX - c.minX
+    const d = c.maxZ - c.minZ
+    const geo = new THREE.PlaneGeometry(w, d)
+    geo.rotateX(-Math.PI / 2)
+    const uv = geo.getAttribute('uv') as THREE.BufferAttribute
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * (w / 20), uv.getY(i) * (d / 20))
+    const mat = new THREE.MeshBasicMaterial({ map: loadTex(manifest['road.jpg']), vertexColors: true })
+    patchMaterial(mat)
+    const quad = new THREE.Mesh(geo, mat)
+    quad.position.set(
+      TACOS_TOWN.x + (c.minX + c.maxX) / 2,
+      TACOS_TOWN.y - 0.04,
+      TACOS_TOWN.z + (c.minZ + c.maxZ) / 2,
+    )
+    world.group.add(quad)
+    quad.updateMatrixWorld(true)
+    meshes.push(quad) // joins the lamp-tint vertex bake below
+  }
 
   // vertex bake: sample the shared lamp list at every vertex (same pipeline as the
   // terrain bake) — sodium pools land on the town roads and building fronts
